@@ -133,9 +133,15 @@ func main() {
 
 		w := waybar.New()
 
-		if ps.Status != "play" {
+		isPhysicalInput := ps.Mode == "40" || ps.Mode == "41" || ps.Mode == "43"
+
+		if ps.Status != "play" && !isPhysicalInput {
 			w.Class = "stopped"
 			w.Alt = "stopped"
+		} else if isPhysicalInput {
+			w.Text = modeName(ps.Mode)
+			w.Class = strings.ToLower(modeName(ps.Mode))
+			w.Alt = strings.ToLower(modeName(ps.Mode))
 		} else {
 			// Try getMetaInfo first — it returns plain text.
 			meta, metaErr := fetchJSON[MetaInfo](client, baseURL+"getMetaInfo")
