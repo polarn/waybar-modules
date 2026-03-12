@@ -12,15 +12,14 @@ type Waybar struct {
 	Alt     string `json:"alt,omitempty"`
 }
 
-func WayBar() Waybar {
-	waybar := Waybar{}
-	return waybar
+func New() Waybar {
+	return Waybar{}
 }
 
 func (w Waybar) Print() error {
-	b, error := json.Marshal(w)
-	if error != nil {
-		return error
+	b, err := json.Marshal(w)
+	if err != nil {
+		return err
 	}
 	fmt.Println(string(b))
 	return nil

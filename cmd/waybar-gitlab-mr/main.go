@@ -45,29 +45,30 @@ func main() {
 		})
 		if err != nil {
 			log.Println(err)
-			break
+			time.Sleep(time.Duration(interval) * time.Second)
+			continue
 		}
 
-		numMRs := 0
 		var tooltips []string
-		for _, mr := range mergeRequests {
-			log.Printf("%d: %s - %s\n", numMRs, mr.Title, mr.WebURL)
-			numMRs++
+		for i, mr := range mergeRequests {
+			log.Printf("%d: %s - %s\n", i, mr.Title, mr.WebURL)
 			tooltips = append(tooltips, mr.Title)
 		}
 
 		status := "none"
-		if numMRs > 0 {
+		if len(mergeRequests) > 0 {
 			status = "found"
 		}
 
-		waybar := waybar.WayBar()
-		waybar.Text = fmt.Sprintf("%d", numMRs)
-		waybar.ToolTip = strings.Join(tooltips, "\n")
-		waybar.Class = status
-		waybar.Alt = status
+		w := waybar.New()
+		w.Text = fmt.Sprintf("%d", len(mergeRequests))
+		w.ToolTip = strings.Join(tooltips, "\n")
+		w.Class = status
+		w.Alt = status
 
-		waybar.Print()
+		if err := w.Print(); err != nil {
+			log.Printf("Error printing waybar output: %s", err)
+		}
 
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
