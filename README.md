@@ -59,3 +59,32 @@ Here is an example of how to style it using the `~/.config/waybar/style.css` fil
     background: #fecf48;
 }
 ```
+
+## waybar-wiim-nowplaying
+A Waybar module that displays the currently playing song from a WiiM device (amp, mini, pro, etc.) on your network.
+
+It uses the LinkPlay HTTP API exposed by WiiM devices to poll for playback status.
+
+Usage: `waybar-wiim-nowplaying --host <wiim-ip>` with an optional `--interval` flag (default 5 seconds).
+
+The command outputs JSON with:
+
+* text - "Artist - Title" when playing, empty when stopped/paused.
+* tooltip - Title, artist and album on separate lines.
+* class - `playing` or `stopped` for styling.
+* alt - same as class, for `format-icons`.
+
+Add this to your Waybar configuration file, usually `~/.config/waybar/config`:
+
+```json
+    "custom/wiim": {
+        "format": "{} {icon}",
+        "return-type": "json",
+        "format-icons": {
+            "playing": "󰎈",
+            "stopped": "󰎊"
+        },
+        "exec-if": "which waybar-wiim-nowplaying",
+        "exec": "waybar-wiim-nowplaying --host 192.168.1.100"
+    }
+```
