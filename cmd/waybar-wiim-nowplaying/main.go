@@ -9,7 +9,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 type PlayerStatus struct {
 	Status string `json:"status"`
 	Mode   string `json:"mode"`
+	Volume string `json:"vol"`
 	Title  string `json:"Title"`
 	Artist string `json:"Artist"`
 	Album  string `json:"Album"`
@@ -107,6 +110,9 @@ func resolveRadioStation(client *http.Client, stationID string) *TuneInStation {
 func main() {
 	host := flag.String("host", "", "WiiM device IP address or hostname")
 	interval := flag.Int("interval", 5, "Polling interval in seconds")
+	volUp := flag.Bool("volume-up", false, "Increase volume and exit")
+	volDown := flag.Bool("volume-down", false, "Decrease volume and exit")
+	volStep := flag.Int("volume-step", 5, "Volume step size (1-100)")
 	flag.Parse()
 
 	if *host == "" {
@@ -121,6 +127,12 @@ func main() {
 	}
 
 	baseURL := fmt.Sprintf("https://%s/httpapi.asp?command=", *host)
+
+	if *volUp || *volDown {
+		adjustVolume(client, baseURL, *volUp, *volStep)
+		os.Exit(0)
+	}
+
 	stationCache := make(map[string]*TuneInStation)
 
 	for {
@@ -237,6 +249,37 @@ func main() {
 
 		time.Sleep(time.Duration(*interval) * time.Second)
 	}
+}
+
+func adjustVolume(client *http.Client, baseURL string, up bool, step int) {
+	ps, err := fetchJSON[PlayerStatus](client, baseURL+"getPlayerStatus")
+	if err != nil {
+		log.Fatalf("Failed to get player status: %v", err)
+	}
+
+	vol, err := strconv.Atoi(ps.Volume)
+	if err != nil {
+		log.Fatalf("Failed to parse volume %q: %v", ps.Volume, err)
+	}
+
+	if up {
+		vol += step
+	} else {
+		vol -= step
+	}
+	if vol > 100 {
+		vol = 100
+	}
+	if vol < 0 {
+		vol = 0
+	}
+
+	setURL := fmt.Sprintf("%ssetPlayerCmd:vol:%d", baseURL, vol)
+	resp, err := client.Get(setURL)
+	if err != nil {
+		log.Fatalf("Failed to set volume: %v", err)
+	}
+	resp.Body.Close()
 }
 
 func fetchJSON[T any](client *http.Client, url string) (*T, error) {
