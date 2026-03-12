@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -98,6 +99,74 @@ func extractTuneInID(s string) string {
 	return ""
 }
 
+type mprisMetadata struct {
+	Title  string
+	Artist string
+	Album  string
+}
+
+func queryMPRIS() *mprisMetadata {
+	out, err := exec.Command("playerctl", "metadata",
+		"--format", "{{artist}}\n{{title}}\n{{album}}").Output()
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) < 2 {
+		return nil
+	}
+	m := &mprisMetadata{
+		Artist: lines[0],
+		Title:  lines[1],
+	}
+	if len(lines) >= 3 {
+		m.Album = lines[2]
+	}
+	if m.Title == "" && m.Artist == "" {
+		return nil
+	}
+	return m
+}
+
+func queryPipeWire() string {
+	out, err := exec.Command("pw-dump").Output()
+	if err != nil {
+		return ""
+	}
+
+	var objects []json.RawMessage
+	if err := json.Unmarshal(out, &objects); err != nil {
+		return ""
+	}
+
+	for _, raw := range objects {
+		var obj struct {
+			Info struct {
+				State string `json:"state"`
+				Props map[string]any `json:"props"`
+			} `json:"info"`
+		}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			continue
+		}
+		props := obj.Info.Props
+		mediaClass, _ := props["media.class"].(string)
+		if mediaClass != "Stream/Output/Audio" {
+			continue
+		}
+		if obj.Info.State != "running" {
+			continue
+		}
+		if name, _ := props["application.name"].(string); name != "" {
+			return name
+		}
+		if name, _ := props["node.name"].(string); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 func resolveRadioStation(client *http.Client, stationID string) *TuneInStation {
 	url := fmt.Sprintf("http://opml.radiotime.com/Describe.ashx?id=%s&render=json", stationID)
 	resp, err := fetchJSON[TuneInResponse](client, url)
@@ -151,9 +220,35 @@ func main() {
 			w.Class = "stopped"
 			w.Alt = "stopped"
 		} else if isPhysicalInput {
-			w.Text = modeName(ps.Mode)
-			w.Class = strings.ToLower(modeName(ps.Mode))
-			w.Alt = strings.ToLower(modeName(ps.Mode))
+			source := modeName(ps.Mode)
+			w.Class = strings.ToLower(source)
+			w.Alt = strings.ToLower(source)
+
+			if mpris := queryMPRIS(); mpris != nil {
+				switch {
+				case mpris.Artist != "" && mpris.Title != "":
+					w.Text = fmt.Sprintf("%s - %s", mpris.Artist, mpris.Title)
+				case mpris.Title != "":
+					w.Text = mpris.Title
+				default:
+					w.Text = mpris.Artist
+				}
+				var tip []string
+				for _, s := range []string{mpris.Title, mpris.Artist, mpris.Album} {
+					if s != "" {
+						tip = append(tip, s)
+					}
+				}
+				w.ToolTip = strings.Join(tip, "\n")
+				w.Class = "playing"
+				w.Alt = "playing"
+			} else if pwApp := queryPipeWire(); pwApp != "" {
+				w.Text = pwApp
+				w.Class = "playing"
+				w.Alt = "playing"
+			} else {
+				w.Text = source
+			}
 		} else {
 			// Try getMetaInfo first — it returns plain text.
 			meta, metaErr := fetchJSON[MetaInfo](client, baseURL+"getMetaInfo")
