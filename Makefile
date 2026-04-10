@@ -8,8 +8,10 @@ build:
 
 install: build
 	@for bin in ./build/*; do \
-		rm -f $(DESTDIR)/$$(basename $$bin); \
+		name=$$(basename $$bin); \
+		rm -f $(DESTDIR)/$$name; \
 		cp $$bin $(DESTDIR)/; \
+		pkill -x $$name 2>/dev/null || true; \
 	done
 
 clean:
