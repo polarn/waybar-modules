@@ -4,6 +4,7 @@ DESTDIR ?= $(HOME)/.local/bin
 
 build:
 	go build -o ./build/waybar-gitlab-mr ./cmd/waybar-gitlab-mr
+	go build -o ./build/waybar-github-pr ./cmd/waybar-github-pr
 	go build -o ./build/waybar-wiim-nowplaying ./cmd/waybar-wiim-nowplaying
 
 install: build

@@ -7,6 +7,7 @@ Personal waybar custom modules written in Go. Each module is a long-running proc
 ## Repository structure
 
 - `cmd/waybar-gitlab-mr/` - Displays count of GitLab merge requests awaiting review
+- `cmd/waybar-github-pr/` - Displays count of approved GitHub PRs ready to merge, with rofi-based click-to-open
 - `cmd/waybar-wiim-nowplaying/` - Displays now-playing info from a WiiM device (amp/mini/pro)
 - `pkg/waybar/` - Shared `Waybar` struct with JSON output and `Print()` method
 
@@ -66,6 +67,26 @@ The `--volume-up` and `--volume-down` flags perform a one-shot volume adjustment
 ### Junk value filtering
 
 The `isUseful()` helper rejects empty strings, URLs (`http://`/`https://`), and `"unknow"`/`"unknown"` values that the WiiM API frequently returns.
+
+## GitHub PR module details
+
+### Data source
+
+Uses the `gh` CLI (`gh search prs`) rather than a Go library — no token env var needed, relies on existing `gh auth` session.
+
+### Query
+
+`gh search prs --review=approved --state=open --author=@me` — finds all open PRs authored by the current user that have at least one approved review.
+
+### Click-to-open (`--open` flag)
+
+The polling loop writes the current PR list to `$XDG_RUNTIME_DIR/waybar-github-prs.json` as a cache. The `--open` flag reads this cache and:
+
+- **0 PRs**: does nothing
+- **1 PR**: opens directly via `xdg-open`
+- **Multiple PRs**: presents a rofi dmenu for selection, then opens the chosen PR
+
+Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
 
 ## Adding a new module
 
