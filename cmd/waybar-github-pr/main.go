@@ -37,28 +37,43 @@ func main() {
 	}
 
 	for {
-		prs, err := fetchApprovedPRs()
+		approved, err := fetchPRs("approved")
 		if err != nil {
-			log.Printf("Error fetching PRs: %s", err)
+			log.Printf("Error fetching approved PRs: %s", err)
+			time.Sleep(time.Duration(interval) * time.Second)
+			continue
+		}
+
+		all, err := fetchPRs("")
+		if err != nil {
+			log.Printf("Error fetching all PRs: %s", err)
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
 
 		var tooltips []string
-		for _, pr := range prs {
+		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
-			tooltips = append(tooltips, fmt.Sprintf("[%s] %s", pr.Repository.NameWithOwner, pr.Title))
+			prefix := "  "
+			if isApproved(pr, approved) {
+				prefix = "✓ "
+			}
+			line := fmt.Sprintf("%s[%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title)
+			if len(line) > 70 {
+				line = line[:67] + "..."
+			}
+			tooltips = append(tooltips, line)
 		}
 
 		status := "none"
-		if len(prs) > 0 {
+		if len(approved) > 0 {
 			status = "found"
 		}
 
-		writePRCache(prs)
+		writePRCache(all, approved)
 
 		w := waybar.New()
-		w.Text = fmt.Sprintf("%d", len(prs))
+		w.Text = fmt.Sprintf("%d / %d", len(approved), len(all))
 		w.ToolTip = strings.Join(tooltips, "\n")
 		w.Class = status
 		w.Alt = status
@@ -71,15 +86,17 @@ func main() {
 	}
 }
 
-func fetchApprovedPRs() ([]PR, error) {
-	cmd := exec.Command("gh", "search", "prs",
-		"--review=approved",
+func fetchPRs(review string) ([]PR, error) {
+	args := []string{"search", "prs",
 		"--state=open",
 		"--author=@me",
 		"--json=title,url,repository",
-	)
+	}
+	if review != "" {
+		args = append(args, "--review="+review)
+	}
 
-	out, err := cmd.Output()
+	out, err := exec.Command("gh", args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh search: %w", err)
 	}
@@ -92,6 +109,15 @@ func fetchApprovedPRs() ([]PR, error) {
 	return prs, nil
 }
 
+func isApproved(pr PR, approved []PR) bool {
+	for _, a := range approved {
+		if a.URL == pr.URL {
+			return true
+		}
+	}
+	return false
+}
+
 func cacheFilePath() string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
@@ -100,8 +126,13 @@ func cacheFilePath() string {
 	return filepath.Join(dir, "waybar-github-prs.json")
 }
 
-func writePRCache(prs []PR) {
-	data, err := json.Marshal(prs)
+type PRCache struct {
+	All      []PR `json:"all"`
+	Approved []PR `json:"approved"`
+}
+
+func writePRCache(all, approved []PR) {
+	data, err := json.Marshal(PRCache{All: all, Approved: approved})
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
 		return
@@ -118,25 +149,28 @@ func openPRs() {
 		return
 	}
 
-	var prs []PR
-	if err := json.Unmarshal(data, &prs); err != nil {
+	var cache PRCache
+	if err := json.Unmarshal(data, &cache); err != nil {
 		log.Printf("Error reading PR cache: %s", err)
 		return
 	}
 
-	if len(prs) == 0 {
+	if len(cache.All) == 0 {
 		return
 	}
 
-	if len(prs) == 1 {
-		exec.Command("xdg-open", prs[0].URL).Start()
+	if len(cache.All) == 1 {
+		exec.Command("xdg-open", cache.All[0].URL).Start()
 		return
 	}
 
-	// Build rofi menu: "label\0info\0url"
 	var entries []string
-	for _, pr := range prs {
-		entries = append(entries, fmt.Sprintf("[%s] %s", pr.Repository.NameWithOwner, pr.Title))
+	for _, pr := range cache.All {
+		prefix := "○"
+		if isApproved(pr, cache.Approved) {
+			prefix = "✓"
+		}
+		entries = append(entries, fmt.Sprintf("%s [%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title))
 	}
 
 	cmd := exec.Command("rofi", "-dmenu", "-p", "Open PR", "-i")
@@ -149,7 +183,7 @@ func openPRs() {
 	selected := strings.TrimSpace(string(out))
 	for i, entry := range entries {
 		if entry == selected {
-			exec.Command("xdg-open", prs[i].URL).Start()
+			exec.Command("xdg-open", cache.All[i].URL).Start()
 			return
 		}
 	}
