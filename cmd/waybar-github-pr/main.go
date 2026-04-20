@@ -173,7 +173,7 @@ func openPRs() {
 		entries = append(entries, fmt.Sprintf("%s [%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title))
 	}
 
-	cmd := exec.Command("rofi", "-dmenu", "-p", "Open PR", "-i")
+	cmd := exec.Command("fuzzel", "--dmenu", "--width=75", "--prompt", "Open PR > ")
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {
