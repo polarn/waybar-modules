@@ -20,8 +20,10 @@ import (
 var gpuNames = []string{"amdgpu", "nouveau", "i915", "xe"}
 
 // gpuModel resolves a human-readable GPU name via lspci using the PCI
-// address owning the hwmon directory. Falls back to the hwmon name if
-// lspci isn't available or fails.
+// address owning the hwmon directory. lspci only knows the silicon family
+// from pci.ids — for the exact card variant (e.g. RX 9070 vs 9070 XT)
+// pass -model at startup. Falls back to the hwmon name if lspci isn't
+// available or fails.
 func gpuModel(hwmonDir string) string {
 	fallback, _ := hwmon.Name(hwmonDir)
 	if fallback == "" {
@@ -35,15 +37,42 @@ func gpuModel(hwmonDir string) string {
 	if err != nil {
 		return fallback
 	}
-	s := strings.TrimSpace(string(out))
-	// Line looks like:
-	//   03:00.0 VGA compatible controller: <name> (rev ..)
+	return shortenLspci(strings.TrimSpace(string(out)), fallback)
+}
+
+// shortenLspci trims verbose vendor fluff from an lspci line. Example input:
+//
+//	03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070/9070 XT/9070 GRE] (rev c0)
+//
+// Output: "Navi 48 (Radeon RX 9070/9070 XT/9070 GRE)"
+func shortenLspci(line, fallback string) string {
+	s := line
 	if _, after, ok := strings.Cut(s, ": "); ok {
 		s = after
 	}
 	if idx := strings.Index(s, " (rev "); idx >= 0 {
 		s = s[:idx]
 	}
+	// Drop "Advanced Micro Devices, Inc. [AMD/ATI] " / "Intel Corporation " /
+	// "NVIDIA Corporation " prefixes (legalese duplicated in the "[...]" group).
+	for _, prefix := range []string{
+		"Advanced Micro Devices, Inc. [AMD/ATI] ",
+		"Advanced Micro Devices, Inc. ",
+		"NVIDIA Corporation ",
+		"Intel Corporation ",
+	} {
+		s = strings.TrimPrefix(s, prefix)
+	}
+	// "[AMD/ATI]" can also appear mid-string with no inner brackets;
+	// similarly "[AMD]". Drop when present.
+	for _, tag := range []string{"[AMD/ATI] ", "[AMD] "} {
+		s = strings.ReplaceAll(s, tag, "")
+	}
+	// Normalise the model bracket to parens so it doesn't look like a
+	// markup tag.
+	s = strings.ReplaceAll(s, "[", "(")
+	s = strings.ReplaceAll(s, "]", ")")
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return fallback
 	}
@@ -75,6 +104,7 @@ func pickGPU() string {
 func main() {
 	interval := flag.Int("interval", 2, "Polling interval in seconds")
 	sensor := flag.String("sensor", "edge", "Primary sensor label to show (e.g. edge, junction, mem)")
+	model := flag.String("model", "", "Override the GPU model name shown in the tooltip (auto-discovered via lspci otherwise)")
 	warnAt := flag.Float64("warn", 75, "Class=warm above this °C")
 	critAt := flag.Float64("crit", 90, "Class=critical above this °C")
 	flag.Parse()
@@ -83,7 +113,10 @@ func main() {
 	if dir == "" {
 		log.Fatalf("no GPU temperature sensor found (looked for: %v)", gpuNames)
 	}
-	model := gpuModel(dir)
+	displayModel := *model
+	if displayModel == "" {
+		displayModel = gpuModel(dir)
+	}
 
 	ticker := time.NewTicker(time.Duration(*interval) * time.Second)
 	defer ticker.Stop()
@@ -117,7 +150,7 @@ func main() {
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "<b>%s</b>", model)
+		fmt.Fprintf(&b, "<b>%s</b>", displayModel)
 		name, _ := hwmon.Name(dir)
 		fmt.Fprintf(&b, "\n\n<b>%s</b>", name)
 		for _, r := range readings {
