@@ -23,6 +23,7 @@ type PlayerStatus struct {
 	Status string `json:"status"`
 	Mode   string `json:"mode"`
 	Volume string `json:"vol"`
+	Mute   string `json:"mute"`
 	Title  string `json:"Title"`
 	Artist string `json:"Artist"`
 	Album  string `json:"Album"`
@@ -336,6 +337,13 @@ func main() {
 					w.Alt = "stopped"
 				}
 			}
+		}
+
+		// Mute overrides the playing/stopped class — swap the icon but
+		// keep whatever text the branches above produced.
+		if ps.Mute == "1" {
+			w.Class = "muted"
+			w.Alt = "muted"
 		}
 
 		if err := w.Print(); err != nil {
