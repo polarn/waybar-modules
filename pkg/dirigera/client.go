@@ -1,6 +1,7 @@
 package dirigera
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -61,6 +62,64 @@ type Attributes struct {
 	ColorHue         float64 `json:"colorHue"`
 	ColorSaturation  float64 `json:"colorSaturation"`
 	ColorTemperature int     `json:"colorTemperature"`
+}
+
+// SetLightOn flips the given device's on/off state via PATCH. Works
+// for any light or outlet that exposes the isOn attribute.
+func (c *Client) SetLightOn(id string, on bool) error {
+	type body struct {
+		Attributes struct {
+			IsOn bool `json:"isOn"`
+		} `json:"attributes"`
+	}
+	var b [1]body
+	b[0].Attributes.IsOn = on
+	return c.patchDevice(id, b[:])
+}
+
+// SetLightBrightness sets the brightness to 0..100. No-op if the light
+// is off (DIRIGERA accepts the write but doesn't visibly change anything
+// until isOn=true).
+func (c *Client) SetLightBrightness(id string, pct int) error {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	type body struct {
+		Attributes struct {
+			LightLevel int `json:"lightLevel"`
+		} `json:"attributes"`
+	}
+	var b [1]body
+	b[0].Attributes.LightLevel = pct
+	return c.patchDevice(id, b[:])
+}
+
+func (c *Client) patchDevice(id string, payload any) error {
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPatch, c.baseURL()+"/v1/devices/"+id, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("patch %s: %w", id, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("patch %s: %s: %s", id, resp.Status, string(body))
+	}
+	return nil
 }
 
 // Devices returns all devices known to the hub.
