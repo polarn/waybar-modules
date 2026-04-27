@@ -73,7 +73,7 @@ func main() {
 		writePRCache(all, approved)
 
 		w := waybar.New()
-		w.Text = fmt.Sprintf("%d / %d", len(approved), len(all))
+		w.Text = fmt.Sprintf("%d·%d", len(approved), len(all))
 		w.ToolTip = strings.Join(tooltips, "\n")
 		w.Class = status
 		w.Alt = status

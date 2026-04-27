@@ -11,6 +11,7 @@ build:
 	go build -o ./build/waybar-tradfri-auth ./cmd/waybar-tradfri-auth
 	go build -o ./build/waybar-tradfri ./cmd/waybar-tradfri
 	go build -o ./build/tradfri-ctl ./cmd/tradfri-ctl
+	go build -o ./build/waybar-allsvenskan ./cmd/waybar-allsvenskan
 
 install: build
 	@for bin in ./build/*; do \
