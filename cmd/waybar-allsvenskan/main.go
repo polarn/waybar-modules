@@ -96,10 +96,37 @@ type cachedDay struct {
 
 var dayCache = map[string]cachedDay{}
 
+// todayInMatchWindow is true if any cached match for today is in its active
+// window: 15 min before scheduled kickoff through 150 min after (covers
+// warmup, 90 min + injury time, and post-match settling). Outside this
+// window the data won't change in real time, so we can poll lazily.
+//
+// Falls back to "true" if we have no cache yet — better to poll once and
+// learn than miss the start of a match.
+func todayInMatchWindow(now time.Time) bool {
+	c, ok := dayCache[now.Format("20060102")]
+	if !ok {
+		return true
+	}
+	for _, m := range c.matches {
+		t, err := time.Parse("02.01.2006 15:04", m.Time)
+		if err != nil {
+			continue
+		}
+		if now.After(t.Add(-15*time.Minute)) && now.Before(t.Add(150*time.Minute)) {
+			return true
+		}
+	}
+	return false
+}
+
 func ttlFor(d, now time.Time) time.Duration {
 	switch {
 	case sameDay(d, now):
-		return 30 * time.Second
+		if todayInMatchWindow(now) {
+			return 30 * time.Second
+		}
+		return 10 * time.Minute
 	case d.Before(now):
 		return 24 * time.Hour
 	default:
