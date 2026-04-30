@@ -12,6 +12,7 @@ build:
 	go build -o ./build/waybar-tradfri ./cmd/waybar-tradfri
 	go build -o ./build/tradfri-ctl ./cmd/tradfri-ctl
 	go build -o ./build/waybar-allsvenskan ./cmd/waybar-allsvenskan
+	go build -o ./build/waybar-batteries ./cmd/waybar-batteries
 
 install: build
 	@for bin in ./build/*; do \
