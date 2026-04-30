@@ -24,16 +24,57 @@ type Repository struct {
 	NameWithOwner string `json:"nameWithOwner"`
 }
 
+// Notification mirrors the subset of fields we use from the GitHub
+// /notifications endpoint. See gh api notifications | jq '.[0]' for the
+// full structure.
+type Notification struct {
+	ID         string `json:"id"`
+	Reason     string `json:"reason"`
+	Unread     bool   `json:"unread"`
+	UpdatedAt  string `json:"updated_at"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Subject struct {
+		Title string `json:"title"`
+		Type  string `json:"type"`
+		URL   string `json:"url"`
+	} `json:"subject"`
+}
+
+// Tracks notification IDs we've already notify-send'd for. Lives for the
+// daemon's lifetime — restart loses state, but that's fine: on first poll
+// after start we baseline (mark all current as seen) so the user doesn't
+// get a startup flood for pre-existing unread items.
+var (
+	seenNotifs       = make(map[string]bool)
+	notifsBaselined  = false
+)
+
 func main() {
 	var interval int
 	var open bool
+	var notify bool
+	var notifyReasonsCSV string
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
+	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
+	flag.StringVar(&notifyReasonsCSV, "notify-reasons",
+		"mention,team_mention,review_requested,assign,comment,author",
+		"Comma-separated reasons that should produce notify-send + count toward the pill")
 	flag.Parse()
 
 	if open {
 		openPRs()
 		return
+	}
+
+	notifyReasons := map[string]bool{}
+	for _, r := range strings.Split(notifyReasonsCSV, ",") {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			notifyReasons[r] = true
+		}
 	}
 
 	for {
@@ -70,10 +111,30 @@ func main() {
 			status = "found"
 		}
 
-		writePRCache(all, approved)
+		// Pull notifications, fire notify-send for any new ones, and feed the
+		// filtered count into the pill / tooltip / left-click menu.
+		notifs := processNotifications(notifyReasons, notify)
+		writePRCache(all, approved, notifs)
+
+		text := fmt.Sprintf("%d·%d", len(approved), len(all))
+		if len(notifs) > 0 {
+			text += fmt.Sprintf(" 󰂜 %d", len(notifs))
+		}
+
+		if len(notifs) > 0 {
+			tooltips = append(tooltips, "")
+			tooltips = append(tooltips, "<b>Notifications</b>")
+			for _, n := range notifs {
+				line := fmt.Sprintf("  [%s] %s · %s", n.Reason, n.Repository.FullName, n.Subject.Title)
+				if len(line) > 80 {
+					line = line[:77] + "..."
+				}
+				tooltips = append(tooltips, line)
+			}
+		}
 
 		w := waybar.New()
-		w.Text = fmt.Sprintf("%d·%d", len(approved), len(all))
+		w.Text = text
 		w.ToolTip = strings.Join(tooltips, "\n")
 		w.Class = status
 		w.Alt = status
@@ -83,6 +144,101 @@ func main() {
 		}
 
 		time.Sleep(time.Duration(interval) * time.Second)
+	}
+}
+
+// fetchNotifications reads the user's unread GitHub notifications via the
+// already-authenticated gh CLI. Returns the raw list — caller filters.
+func fetchNotifications() ([]Notification, error) {
+	out, err := exec.Command("gh", "api", "notifications").Output()
+	if err != nil {
+		return nil, err
+	}
+	var n []Notification
+	if err := json.Unmarshal(out, &n); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// processNotifications filters by reason, baselines on first run (so the
+// daemon doesn't spam notify-send for everything sitting unread on startup),
+// and fires notify-send for genuinely new notifications. Returns the filtered
+// set so the caller can display a count and tooltip.
+func processNotifications(reasons map[string]bool, notify bool) []Notification {
+	all, err := fetchNotifications()
+	if err != nil {
+		log.Printf("notifications: %s", err)
+		return nil
+	}
+	var filtered []Notification
+	for _, n := range all {
+		if !n.Unread {
+			continue
+		}
+		if !reasons[n.Reason] {
+			continue
+		}
+		filtered = append(filtered, n)
+	}
+	if !notify {
+		return filtered
+	}
+	if !notifsBaselined {
+		for _, n := range filtered {
+			seenNotifs[n.ID] = true
+		}
+		notifsBaselined = true
+		return filtered
+	}
+	for _, n := range filtered {
+		if seenNotifs[n.ID] {
+			continue
+		}
+		seenNotifs[n.ID] = true
+		notifySendForGitHub(n)
+	}
+	return filtered
+}
+
+// notifySendForGitHub turns a notification into a freedesktop-style desktop
+// notification. swaync renders these and the user can click through to
+// GitHub manually.
+func notifySendForGitHub(n Notification) {
+	title := titleForReason(n.Reason)
+	body := fmt.Sprintf("[%s] %s", n.Repository.FullName, n.Subject.Title)
+	cmd := exec.Command("notify-send",
+		"--app-name", "GitHub",
+		"--icon", "github",
+		"--category", "im.received",
+		title, body)
+	if err := cmd.Run(); err != nil {
+		log.Printf("notify-send failed: %s", err)
+	}
+}
+
+func titleForReason(reason string) string {
+	switch reason {
+	case "mention":
+		return "GitHub: you were mentioned"
+	case "team_mention":
+		return "GitHub: team mentioned"
+	case "review_requested":
+		return "GitHub: review requested"
+	case "assign":
+		return "GitHub: assigned"
+	case "comment":
+		return "GitHub: new comment"
+	case "author":
+		return "GitHub: activity on your PR"
+	case "ci_activity":
+		return "GitHub: CI activity"
+	case "state_change":
+		return "GitHub: state changed"
+	case "security_alert":
+		return "GitHub: security alert"
+	default:
+		return "GitHub: " + reason
 	}
 }
 
@@ -127,12 +283,13 @@ func cacheFilePath() string {
 }
 
 type PRCache struct {
-	All      []PR `json:"all"`
-	Approved []PR `json:"approved"`
+	All           []PR           `json:"all"`
+	Approved      []PR           `json:"approved"`
+	Notifications []Notification `json:"notifications,omitempty"`
 }
 
-func writePRCache(all, approved []PR) {
-	data, err := json.Marshal(PRCache{All: all, Approved: approved})
+func writePRCache(all, approved []PR, notifs []Notification) {
+	data, err := json.Marshal(PRCache{All: all, Approved: approved, Notifications: notifs})
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
 		return
@@ -142,38 +299,72 @@ func writePRCache(all, approved []PR) {
 	}
 }
 
+// subjectWebURL converts a notification's API URL to the equivalent
+// github.com URL that xdg-open can sensibly hand to the browser. Covers
+// PRs and issues (the vast majority of notifications); anything else
+// falls back to the API URL, which the browser will redirect/render.
+func subjectWebURL(n Notification) string {
+	s := n.Subject.URL
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "https://api.github.com/repos/")
+	s = strings.Replace(s, "/pulls/", "/pull/", 1) // singular on web
+	return "https://github.com/" + s
+}
+
+// openPRs opens a fuzzel picker that merges the cached open PRs with any
+// unread notifications. Selecting an entry opens the relevant URL in the
+// default browser.
 func openPRs() {
 	data, err := os.ReadFile(cacheFilePath())
 	if err != nil {
-		log.Printf("No cached PRs: %s", err)
+		log.Printf("No cached items: %s", err)
 		return
 	}
 
 	var cache PRCache
 	if err := json.Unmarshal(data, &cache); err != nil {
-		log.Printf("Error reading PR cache: %s", err)
+		log.Printf("Error reading cache: %s", err)
 		return
 	}
 
-	if len(cache.All) == 0 {
-		return
+	type item struct {
+		label string
+		url   string
 	}
-
-	if len(cache.All) == 1 {
-		exec.Command("xdg-open", cache.All[0].URL).Start()
-		return
-	}
-
-	var entries []string
+	var items []item
 	for _, pr := range cache.All {
 		prefix := "○"
 		if isApproved(pr, cache.Approved) {
 			prefix = "✓"
 		}
-		entries = append(entries, fmt.Sprintf("%s [%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title))
+		items = append(items, item{
+			label: fmt.Sprintf("%s [%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title),
+			url:   pr.URL,
+		})
+	}
+	for _, n := range cache.Notifications {
+		items = append(items, item{
+			label: fmt.Sprintf("󰂜 [%s] [%s] %s", n.Reason, n.Repository.FullName, n.Subject.Title),
+			url:   subjectWebURL(n),
+		})
 	}
 
-	cmd := exec.Command("fuzzel", "--dmenu", "--width=75", "--prompt", "Open PR > ")
+	if len(items) == 0 {
+		return
+	}
+	if len(items) == 1 {
+		exec.Command("xdg-open", items[0].url).Start()
+		return
+	}
+
+	var entries []string
+	for _, it := range items {
+		entries = append(entries, it.label)
+	}
+
+	cmd := exec.Command("fuzzel", "--dmenu", "--width=75", "--prompt", "GitHub > ")
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {
@@ -181,9 +372,9 @@ func openPRs() {
 	}
 
 	selected := strings.TrimSpace(string(out))
-	for i, entry := range entries {
-		if entry == selected {
-			exec.Command("xdg-open", cache.All[i].URL).Start()
+	for _, it := range items {
+		if it.label == selected {
+			exec.Command("xdg-open", it.url).Start()
 			return
 		}
 	}
