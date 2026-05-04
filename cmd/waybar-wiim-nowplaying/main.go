@@ -183,6 +183,7 @@ func main() {
 	volUp := flag.Bool("volume-up", false, "Increase volume and exit")
 	volDown := flag.Bool("volume-down", false, "Decrease volume and exit")
 	volStep := flag.Int("volume-step", 5, "Volume step size (1-100)")
+	swiftbar := flag.Bool("swiftbar", false, "Emit SwiftBar streamable format instead of waybar JSON")
 	flag.Parse()
 
 	if *host == "" {
@@ -346,12 +347,53 @@ func main() {
 			w.Alt = "muted"
 		}
 
+		if *swiftbar {
+			printSwiftBarWiim(w, *host)
+			return
+		}
+
 		if err := w.Print(); err != nil {
 			log.Printf("Error printing waybar output: %s", err)
 		}
 
 		time.Sleep(time.Duration(*interval) * time.Second)
 	}
+}
+
+// printSwiftBarWiim emits one SwiftBar plugin frame and exits. SwiftBar
+// re-runs the script on its filename interval (5s) for the next update.
+func printSwiftBarWiim(w waybar.Waybar, host string) {
+	self, err := os.Executable()
+	if err != nil {
+		self = "waybar-wiim-nowplaying"
+	}
+
+	symbol := ":music.note:"
+	switch w.Class {
+	case "muted":
+		symbol = ":speaker.slash.fill:"
+	case "stopped":
+		symbol = ":stop.fill:"
+	case "bluetooth":
+		symbol = ":wave.3.right:"
+	case "optical", "line-in":
+		symbol = ":cable.connector:"
+	}
+
+	title := w.Text
+	if title == "" {
+		title = "WiiM"
+	}
+	fmt.Printf("%s %s\n", title, symbol)
+	fmt.Println("---")
+	if w.ToolTip != "" {
+		for _, line := range strings.Split(w.ToolTip, "\n") {
+			fmt.Printf("%s | size=12 color=secondaryLabel\n", line)
+		}
+		fmt.Println("---")
+	}
+	fmt.Printf("Volume Up | shell=%s param1=--host param2=%s param3=--volume-up | refresh=true\n", self, host)
+	fmt.Printf("Volume Down | shell=%s param1=--host param2=%s param3=--volume-down | refresh=true\n", self, host)
 }
 
 func adjustVolume(client *http.Client, baseURL string, up bool, step int) {

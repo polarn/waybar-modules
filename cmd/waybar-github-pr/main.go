@@ -55,10 +55,12 @@ func main() {
 	var interval int
 	var open bool
 	var notify bool
+	var swiftbar bool
 	var notifyReasonsCSV string
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
+	flag.BoolVar(&swiftbar, "swiftbar", false, "Emit SwiftBar streamable format instead of waybar JSON (implies --notify=false)")
 	flag.StringVar(&notifyReasonsCSV, "notify-reasons",
 		"mention,team_mention,review_requested,assign,comment,author",
 		"Comma-separated reasons that should produce notify-send + count toward the pill")
@@ -67,6 +69,10 @@ func main() {
 	if open {
 		openPRs()
 		return
+	}
+
+	if swiftbar {
+		notify = false
 	}
 
 	notifyReasons := map[string]bool{}
@@ -114,7 +120,14 @@ func main() {
 		// Pull notifications, fire notify-send for any new ones, and feed the
 		// filtered count into the pill / tooltip / left-click menu.
 		notifs := processNotifications(notifyReasons, notify)
-		writePRCache(all, approved, notifs)
+		if !swiftbar {
+			writePRCache(all, approved, notifs)
+		}
+
+		if swiftbar {
+			printSwiftBarGitHub(approved, all, notifs)
+			return
+		}
 
 		text := fmt.Sprintf("%d·%d", len(approved), len(all))
 		if len(notifs) > 0 {
@@ -145,6 +158,19 @@ func main() {
 
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
+}
+
+// printSwiftBarGitHub emits one SwiftBar plugin frame and exits. SwiftBar
+// runs the script on its filename interval (e.g. github-pr.5m.sh → every 5
+// minutes), so this is invoked fresh each tick — no loop, no separator.
+func printSwiftBarGitHub(approved, all []PR, notifs []Notification) {
+	title := fmt.Sprintf("%d·%d :arrow.triangle.pull:", len(approved), len(all))
+	if len(notifs) > 0 {
+		title = fmt.Sprintf("%d·%d :bell.badge: %d", len(approved), len(all), len(notifs))
+	}
+	fmt.Println(title)
+	fmt.Println("---")
+	fmt.Println("Open PRs | href=https://github.com/pulls")
 }
 
 // fetchNotifications reads the user's unread GitHub notifications via the

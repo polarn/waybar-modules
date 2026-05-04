@@ -1,6 +1,8 @@
 DESTDIR ?= $(HOME)/.local/bin
 
-.PHONY: build clean install
+SWIFTBAR_BINS := waybar-github-pr waybar-wiim-nowplaying
+
+.PHONY: build clean install build-swiftbar install-swiftbar
 
 build:
 	go build -o ./build/waybar-gitlab-mr ./cmd/waybar-gitlab-mr
@@ -14,11 +16,27 @@ build:
 	go build -o ./build/waybar-allsvenskan ./cmd/waybar-allsvenskan
 	go build -o ./build/waybar-batteries ./cmd/waybar-batteries
 
+build-swiftbar:
+	@mkdir -p ./build
+	@for name in $(SWIFTBAR_BINS); do \
+		go build -o ./build/$$name ./cmd/$$name || exit 1; \
+	done
+
 install: build
 	@for bin in ./build/*; do \
 		name=$$(basename $$bin); \
 		rm -f $(DESTDIR)/$$name; \
 		cp $$bin $(DESTDIR)/; \
+		pkill -x $$name 2>/dev/null || true; \
+	done
+
+# pkill ends the streamable subprocess; SwiftBar re-execs the plugin script
+# (which exec's the freshly-installed binary) automatically.
+install-swiftbar: build-swiftbar
+	@mkdir -p $(DESTDIR)
+	@for name in $(SWIFTBAR_BINS); do \
+		rm -f $(DESTDIR)/$$name; \
+		cp ./build/$$name $(DESTDIR)/; \
 		pkill -x $$name 2>/dev/null || true; \
 	done
 
