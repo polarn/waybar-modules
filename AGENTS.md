@@ -4,17 +4,20 @@
 
 Personal waybar custom modules written in Go. Each module is a long-running process that outputs JSON to stdout on a polling interval, consumed by waybar's `custom` module type.
 
+A subset of modules also support a `--swiftbar` flag for use as macOS [SwiftBar](https://swiftbar.app) plugins. In SwiftBar mode the binary is one-shot — emits a single SwiftBar-format frame on stdout and exits — because SwiftBar re-runs polled plugins on the interval encoded in the plugin's filename (e.g. `wiim.5s.sh` → every 5 seconds).
+
 ## Repository structure
 
 - `cmd/waybar-gitlab-mr/` - Displays count of GitLab merge requests awaiting review
-- `cmd/waybar-github-pr/` - Displays count of approved GitHub PRs ready to merge, with rofi-based click-to-open
-- `cmd/waybar-wiim-nowplaying/` - Displays now-playing info from a WiiM device (amp/mini/pro)
+- `cmd/waybar-github-pr/` - Displays count of approved GitHub PRs ready to merge, with rofi-based click-to-open. SwiftBar-enabled.
+- `cmd/waybar-wiim-nowplaying/` - Displays now-playing info from a WiiM device (amp/mini/pro). SwiftBar-enabled.
 - `pkg/waybar/` - Shared `Waybar` struct with JSON output and `Print()` method
 
 ## Building
 
 - `make build` - Compiles all binaries to `./build/`
 - `make install` - Builds, installs to `~/.local/bin/`, and kills running instances so waybar restarts them
+- `make build-swiftbar` / `make install-swiftbar` - Same flow but only for the SwiftBar-enabled subset (currently `waybar-github-pr`, `waybar-wiim-nowplaying`). Used on macOS where the Linux-only modules (hwmon temps, tradfri, etc.) wouldn't compile or be useful.
 - `make clean` - Removes `./build/`
 
 ## Conventions
@@ -23,8 +26,17 @@ Personal waybar custom modules written in Go. Each module is a long-running proc
 - All modules use `pkg/waybar.Waybar` for JSON output (text, tooltip, class, alt)
 - Modules are polling loops: fetch data, print one JSON line, sleep, repeat
 - Flags use the standard `flag` package: `--host`, `--interval`, etc.
+- Modules that opt into SwiftBar add a `--swiftbar` bool flag; when set, the loop is short-circuited to one iteration that prints a SwiftBar frame and the process exits (no JSON, no sleep)
 - No external dependencies beyond what's in `go.mod` (except `go-gitlab` for the MR module)
 - Keep modules simple and self-contained; avoid unnecessary abstractions
+
+## SwiftBar plugin format
+
+SwiftBar plugins emit plain text on stdout: the first line is the menu bar title, then `---` introduces the dropdown. Inline SF Symbols use the `:symbol.name:` syntax (e.g. `:music.note:`, `:arrow.triangle.pull:`). Dropdown rows can have `| href=URL` to open a link, or `| shell=/path param1=… param2=…` to invoke a command — modules use the latter to wire menu actions back to themselves (e.g. WiiM Volume Up/Down re-invokes the binary with `--volume-up` via `os.Executable()` so the path is always self-consistent).
+
+Plugin filename intervals (`5s`, `5m`, etc.) are interpreted by SwiftBar — the binary itself doesn't know or care about the interval in `--swiftbar` mode.
+
+Streamable plugins (`<swiftbar.type>streamable</swiftbar.type>`) were tried first but cause NSStatusItem visibility issues: the menu bar item gets created with empty content during the leading-separator `~~~` priming step, and macOS persists `VisibleCC=0` for it. Polled mode (the current approach) sidesteps that entirely.
 
 ## WiiM now-playing module details
 
@@ -64,6 +76,10 @@ The module talks to the WiiM device's LinkPlay HTTP API at `https://<host>/httpa
 
 The `--volume-up` and `--volume-down` flags perform a one-shot volume adjustment and exit. Used by waybar's `on-scroll-up` / `on-scroll-down`. Step size configurable with `--volume-step` (default 5).
 
+### SwiftBar mode
+
+`--swiftbar` emits one SwiftBar frame and exits. Title is the now-playing text plus an SF Symbol picked from the player class (`:music.note:` / `:speaker.slash.fill:` / `:stop.fill:` / `:cable.connector:` / `:wave.3.right:`). Dropdown rows: tooltip lines as info entries, then Volume Up / Volume Down actions wired back to this binary via `os.Executable()` + `param1=--host param2=<host> param3=--volume-(up|down)`. Scroll-for-volume isn't a thing on SwiftBar so volume is dropdown-only there.
+
 ### Junk value filtering
 
 The `isUseful()` helper rejects empty strings, URLs (`http://`/`https://`), and `"unknow"`/`"unknown"` values that the WiiM API frequently returns.
@@ -88,9 +104,21 @@ The polling loop writes the current PR list to `$XDG_RUNTIME_DIR/waybar-github-p
 
 Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
 
+### SwiftBar mode
+
+`--swiftbar` implies `--notify=false` (no `notify-send` on macOS) and skips the `$XDG_RUNTIME_DIR` cache write (the `--open` flow isn't used). Title is `approved·total :arrow.triangle.pull:`, with a `:bell.badge:` variant when there are unread notifications. Dropdown is a single `Open PRs | href=https://github.com/pulls` row — no per-PR list (intentionally simple; can be extended later by adding a list subcommand).
+
 ## Adding a new module
 
 1. Create `cmd/<name>/main.go`
 2. Use `pkg/waybar.New()` and set `.Text`, `.ToolTip`, `.Class`, `.Alt`
 3. Call `.Print()` each iteration to emit JSON
 4. Add the build line to `Makefile`
+
+### Adding SwiftBar support to an existing module
+
+1. Add a `--swiftbar` bool flag.
+2. After computing the `Waybar` struct (or whatever data the loop normally prints), branch: if swiftbar, call a `printSwiftBar*` helper that emits the SwiftBar frame and `return` from `main` (one-shot; no sleep).
+3. The helper writes plaintext lines: title (with optional `:sf.symbol:`), then `---`, then dropdown rows.
+4. Add the binary name to `SWIFTBAR_BINS` in the Makefile so `make install-swiftbar` picks it up.
+5. Add a corresponding plugin script under `~/.config/swiftbar/plugins/<name>.<interval>.sh` (tracked in chezmoi under the `darwin` guard) that just `exec`s the binary with `--swiftbar` and any host-specific flags.
