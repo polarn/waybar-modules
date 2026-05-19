@@ -41,8 +41,12 @@ type Todo struct {
 	Project    struct {
 		PathWithNamespace string `json:"path_with_namespace"`
 	} `json:"project"`
-	Target struct {
+	TargetType string `json:"target_type"`
+	Target     struct {
 		Title string `json:"title"`
+		// State is "opened"/"closed"/"merged"/"locked" for MRs,
+		// "opened"/"closed" for issues. Empty for stateless target types.
+		State string `json:"state"`
 	} `json:"target"`
 	TargetURL string `json:"target_url"`
 }
@@ -228,6 +232,12 @@ func processTodos(reasons map[string]bool, notify bool) []Todo {
 	var filtered []Todo
 	for _, t := range all {
 		if !reasons[t.ActionName] {
+			continue
+		}
+		// Drop todos whose target is already merged/closed — GitLab leaves
+		// "review_requested" pending forever otherwise. Empty target.State
+		// means a stateless target type (Epic, Design, etc.); let those pass.
+		if t.Target.State != "" && t.Target.State != "opened" {
 			continue
 		}
 		filtered = append(filtered, t)
