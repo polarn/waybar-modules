@@ -8,8 +8,12 @@ import (
 type Waybar struct {
 	Text    string `json:"text"`
 	ToolTip string `json:"tooltip,omitempty"`
-	Class   string `json:"class,omitempty"`
-	Alt     string `json:"alt,omitempty"`
+	// Class is a single CSS class (string) or several (e.g. []string).
+	// waybar applies every entry of an array as a GTK style class, which
+	// lets a module combine independent state dimensions (e.g. a severity
+	// class plus a gauge-bucket class).
+	Class any    `json:"class,omitempty"`
+	Alt   string `json:"alt,omitempty"`
 }
 
 func New() Waybar {

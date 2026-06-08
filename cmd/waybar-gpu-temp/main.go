@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os/exec"
 	"strings"
 	"time"
@@ -140,14 +141,14 @@ func main() {
 		w := waybar.New()
 		w.Text = fmt.Sprintf("%.0f", primary.Celsius)
 
+		tempClass := "normal"
 		switch {
 		case primary.Celsius >= *critAt:
-			w.Class = "critical"
+			tempClass = "critical"
 		case primary.Celsius >= *warnAt:
-			w.Class = "warm"
-		default:
-			w.Class = "normal"
+			tempClass = "warm"
 		}
+		classes := []string{tempClass}
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "<b>%s</b>", displayModel)
@@ -159,6 +160,32 @@ func main() {
 			}
 			fmt.Fprintf(&b, "\n%s: %.0f°C", r.Label, r.Celsius)
 		}
+
+		// Utilization + VRAM go in the tooltip; VRAM additionally drives the
+		// background "gauge" via a vram-NN class (5% buckets). Both are skipped
+		// silently on GPUs that don't expose the amdgpu sysfs files.
+		var stats []string
+		if busy, err := hwmon.GPUBusy(dir); err == nil {
+			stats = append(stats, fmt.Sprintf("GPU load: %d%%", busy))
+		}
+		if used, total, err := hwmon.VRAM(dir); err == nil && total > 0 {
+			pct := float64(used) / float64(total) * 100
+			bucket := int(math.Round(pct/5)) * 5
+			if bucket < 0 {
+				bucket = 0
+			} else if bucket > 100 {
+				bucket = 100
+			}
+			classes = append(classes, fmt.Sprintf("vram-%d", bucket))
+			const gib = 1024 * 1024 * 1024
+			stats = append(stats, fmt.Sprintf("VRAM: %.1f / %.1f GiB (%.0f%%)",
+				float64(used)/gib, float64(total)/gib, pct))
+		}
+		if len(stats) > 0 {
+			fmt.Fprintf(&b, "\n\n%s", strings.Join(stats, "\n"))
+		}
+
+		w.Class = classes
 		w.ToolTip = b.String()
 
 		if err := w.Print(); err != nil {

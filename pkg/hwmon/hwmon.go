@@ -96,6 +96,36 @@ func ReadAll(hwmonDir string) ([]Reading, error) {
 	return out, nil
 }
 
+// VRAM reports GPU video-memory usage in bytes, read from the owning PCI
+// device's mem_info_vram_{used,total} sysfs files (exposed by amdgpu).
+// Returns an error for GPUs that don't publish them.
+func VRAM(hwmonDir string) (used, total uint64, err error) {
+	dev := filepath.Join(hwmonDir, "device")
+	if used, err = readUint(filepath.Join(dev, "mem_info_vram_used")); err != nil {
+		return 0, 0, err
+	}
+	if total, err = readUint(filepath.Join(dev, "mem_info_vram_total")); err != nil {
+		return 0, 0, err
+	}
+	return used, total, nil
+}
+
+// GPUBusy reports GPU utilization as a percentage (0-100), read from the
+// amdgpu gpu_busy_percent sysfs file. Returns an error for GPUs that don't
+// expose it.
+func GPUBusy(hwmonDir string) (uint64, error) {
+	return readUint(filepath.Join(hwmonDir, "device", "gpu_busy_percent"))
+}
+
+// readUint reads a sysfs file holding a single base-10 unsigned integer.
+func readUint(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+}
+
 // CountTempInputs returns the number of tempN_input files under hwmonDir.
 func CountTempInputs(hwmonDir string) int {
 	m, _ := filepath.Glob(filepath.Join(hwmonDir, "temp*_input"))
