@@ -168,6 +168,9 @@ func main() {
 		if busy, err := hwmon.GPUBusy(dir); err == nil {
 			stats = append(stats, fmt.Sprintf("GPU load: %d%%", busy))
 		}
+		if busy, err := hwmon.MemBusy(dir); err == nil {
+			stats = append(stats, fmt.Sprintf("Mem load: %d%%", busy))
+		}
 		if used, total, err := hwmon.VRAM(dir); err == nil && total > 0 {
 			pct := float64(used) / float64(total) * 100
 			bucket := int(math.Round(pct/5)) * 5

@@ -117,6 +117,13 @@ func GPUBusy(hwmonDir string) (uint64, error) {
 	return readUint(filepath.Join(hwmonDir, "device", "gpu_busy_percent"))
 }
 
+// MemBusy reports memory-controller utilization as a percentage (0-100),
+// read from the amdgpu mem_busy_percent sysfs file. Distinct from VRAM
+// capacity usage. Returns an error for GPUs that don't expose it.
+func MemBusy(hwmonDir string) (uint64, error) {
+	return readUint(filepath.Join(hwmonDir, "device", "mem_busy_percent"))
+}
+
 // readUint reads a sysfs file holding a single base-10 unsigned integer.
 func readUint(path string) (uint64, error) {
 	data, err := os.ReadFile(path)
