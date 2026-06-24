@@ -15,6 +15,7 @@ build:
 	go build -o ./build/tradfri-ctl ./cmd/tradfri-ctl
 	go build -o ./build/waybar-allsvenskan ./cmd/waybar-allsvenskan
 	go build -o ./build/waybar-batteries ./cmd/waybar-batteries
+	go build -o ./build/waybar-inhibitors ./cmd/waybar-inhibitors
 
 build-swiftbar:
 	@mkdir -p ./build
