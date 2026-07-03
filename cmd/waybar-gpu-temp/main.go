@@ -5,10 +5,13 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
+	"net/http"
 	"os/exec"
 	"strings"
 	"time"
@@ -16,6 +19,14 @@ import (
 	"github.com/polarn/waybar-modules/pkg/hwmon"
 	"github.com/polarn/waybar-modules/pkg/waybar"
 )
+
+// llamaSwapRunning is llama-swap's GET /running response.
+type llamaSwapRunning struct {
+	Running []struct {
+		Model string `json:"model"`
+		State string `json:"state"`
+	} `json:"running"`
+}
 
 // Known GPU hwmon names. Picked in listed order on first match.
 var gpuNames = []string{"amdgpu", "nouveau", "i915", "xe"}
@@ -108,6 +119,8 @@ func main() {
 	model := flag.String("model", "", "Override the GPU model name shown in the tooltip (auto-discovered via lspci otherwise)")
 	warnAt := flag.Float64("warn", 75, "Class=warm above this °C")
 	critAt := flag.Float64("crit", 90, "Class=critical above this °C")
+	llamaSwap := flag.String("llama-swap", "http://localhost:9292",
+		"llama-swap base URL; loaded models are listed in the tooltip. Empty string disables.")
 	flag.Parse()
 
 	dir := pickGPU()
@@ -117,6 +130,11 @@ func main() {
 	displayModel := *model
 	if displayModel == "" {
 		displayModel = gpuModel(dir)
+	}
+
+	var llamaClient *http.Client
+	if *llamaSwap != "" {
+		llamaClient = &http.Client{Timeout: time.Second}
 	}
 
 	ticker := time.NewTicker(time.Duration(*interval) * time.Second)
@@ -188,6 +206,22 @@ func main() {
 			fmt.Fprintf(&b, "\n\n%s", strings.Join(stats, "\n"))
 		}
 
+		// Loaded LLMs via llama-swap's /running endpoint. Skipped silently
+		// (no logging — this runs every tick) when llama-swap isn't running
+		// or nothing is loaded, mirroring the sysfs skips above.
+		if llamaClient != nil {
+			url := strings.TrimRight(*llamaSwap, "/") + "/running"
+			if resp, err := fetchJSON[llamaSwapRunning](llamaClient, url); err == nil && len(resp.Running) > 0 {
+				b.WriteString("\n\n<b>LLMs</b>")
+				for _, m := range resp.Running {
+					b.WriteString("\n" + escapePango(m.Model))
+					if m.State != "" && m.State != "ready" {
+						fmt.Fprintf(&b, " <small>(%s)</small>", escapePango(m.State))
+					}
+				}
+			}
+		}
+
 		w.Class = classes
 		w.ToolTip = b.String()
 
@@ -195,4 +229,36 @@ func main() {
 			log.Printf("print: %v", err)
 		}
 	}
+}
+
+func fetchJSON[T any](client *http.Client, url string) (*T, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	var result T
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// escapePango escapes the five XML entities so model names from llama-swap's
+// config can't break (or inject) waybar's Pango-markup tooltip.
+func escapePango(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		"'", "&#39;",
+		"\"", "&#34;",
+	).Replace(s)
 }
