@@ -16,6 +16,7 @@ build:
 	go build -o ./build/waybar-allsvenskan ./cmd/waybar-allsvenskan
 	go build -o ./build/waybar-batteries ./cmd/waybar-batteries
 	go build -o ./build/waybar-inhibitors ./cmd/waybar-inhibitors
+	go build -o ./build/volvo-ctl ./cmd/volvo-ctl
 
 build-swiftbar:
 	@mkdir -p ./build
