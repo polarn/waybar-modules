@@ -129,7 +129,7 @@ func main() {
 			status = "found"
 		}
 
-		todos := processTodos(notifyReasons, notify)
+		todos := processTodos(all, notifyReasons, notify)
 		writeCache(all, approved, todos)
 
 		text := fmt.Sprintf("%d·%d", len(approved), len(all))
@@ -224,15 +224,24 @@ func fetchTodos() ([]Todo, error) {
 	return todos, nil
 }
 
-func processTodos(reasons map[string]bool, notify bool) []Todo {
+func processTodos(authored []MR, reasons map[string]bool, notify bool) []Todo {
 	all, err := fetchTodos()
 	if err != nil {
 		log.Printf("todos: %s", err)
 		return nil
 	}
+	authoredURLs := make(map[string]bool, len(authored))
+	for _, mr := range authored {
+		authoredURLs[mr.WebURL] = true
+	}
 	var filtered []Todo
 	for _, t := range all {
 		if !reasons[t.ActionName] {
+			continue
+		}
+		// Drop "assigned" todos for my own open MRs — self-assigning on MR
+		// creation spawns one per MR, duplicating the authored list above.
+		if t.ActionName == "assigned" && authoredURLs[t.TargetURL] {
 			continue
 		}
 		// Drop todos whose target is already merged/closed — GitLab leaves
