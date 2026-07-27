@@ -186,6 +186,7 @@ func fetchAuthoredMRs(username string) ([]MR, error) {
 	params.Set("author_username", username)
 	params.Set("state", "opened")
 	params.Set("scope", "all")
+	params.Set("non_archived", "true")
 	params.Set("per_page", "100")
 	var mrs []MR
 	if err := glabAPI("/merge_requests?"+params.Encode(), &mrs); err != nil {
