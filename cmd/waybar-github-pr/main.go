@@ -49,6 +49,12 @@ type Notification struct {
 var (
 	seenNotifs       = make(map[string]bool)
 	notifsBaselined  = false
+
+	// Remembers whether a notification's subject PR was merged/closed, keyed
+	// by subject URL + updated_at. New activity on the thread (including a
+	// reopen) bumps updated_at and forces a re-check, so each thread costs
+	// one gh api call per activity burst, not per poll.
+	subjectDone = make(map[string]bool)
 )
 
 func main() {
@@ -205,6 +211,9 @@ func processNotifications(reasons map[string]bool, notify bool) []Notification {
 		if !reasons[n.Reason] {
 			continue
 		}
+		if subjectIsDone(n) {
+			continue
+		}
 		filtered = append(filtered, n)
 	}
 	if !notify {
@@ -225,6 +234,29 @@ func processNotifications(reasons map[string]bool, notify bool) []Notification {
 		notifySendForGitHub(n)
 	}
 	return filtered
+}
+
+// subjectIsDone reports whether a PullRequest notification points at a PR
+// that is merged or closed (GitHub reports merged PRs as state "closed").
+// GitHub keeps threads unread until explicitly marked read on github.com,
+// so without this check merged-PR notifications linger forever. Fails open:
+// better to show a stale notification than hide a live one.
+func subjectIsDone(n Notification) bool {
+	if n.Subject.Type != "PullRequest" || n.Subject.URL == "" {
+		return false
+	}
+	key := n.Subject.URL + "@" + n.UpdatedAt
+	if done, ok := subjectDone[key]; ok {
+		return done
+	}
+	out, err := exec.Command("gh", "api", n.Subject.URL, "--jq", ".state").Output()
+	if err != nil {
+		log.Printf("pr state (%s): %s", n.Subject.URL, err)
+		return false
+	}
+	done := strings.TrimSpace(string(out)) != "open"
+	subjectDone[key] = done
+	return done
 }
 
 // notifySendForGitHub turns a notification into a freedesktop-style desktop
