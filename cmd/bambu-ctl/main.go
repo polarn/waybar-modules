@@ -7,6 +7,9 @@
 //   bambu-ctl login    # email + password (or emailed code / 2FA); caches token
 //   bambu-ctl status   # human-readable printer state [--raw]
 //   bambu-ctl waybar   # one compact JSON line for waybar; always exits 0
+//   bambu-ctl pause|resume|stop   # print control (stop confirms first)
+//   bambu-ctl speed <level>       # silent|standard|sport|ludicrous
+//   bambu-ctl light <on|off>      # chamber light
 //
 // Token cache: ~/.config/bambu-cloud.json (~3-month expiry; the waybar
 // pill flips to its reauth state when a new login is needed).
@@ -53,6 +56,14 @@ func main() {
 		cmdStatus(os.Args[2:])
 	case "waybar":
 		cmdWaybar(os.Args[2:])
+	case "pause", "resume":
+		cmdSimplePrint(os.Args[1], os.Args[2:])
+	case "stop":
+		cmdStop(os.Args[2:])
+	case "speed":
+		cmdSpeed(os.Args[2:])
+	case "light":
+		cmdLight(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -378,6 +389,86 @@ func summaryLines(rep *bambu.Report) []string {
 	return lines
 }
 
+// sendAndReport wraps SendCommand with uniform CLI output.
+func sendAndReport(g globalFlags, section, command string, payload any, label string) {
+	sess, serial, err := loadSession(g)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if err := bambu.SendCommand(sess, serial, section, command, payload, 10*time.Second); err != nil {
+		fatal("%s: %v", label, err)
+	}
+	fmt.Printf("%s: ok\n", label)
+}
+
+func printPayload(command, param string) any {
+	return map[string]any{"print": map[string]any{
+		"sequence_id": "0", "command": command, "param": param,
+	}}
+}
+
+func cmdSimplePrint(cmd string, args []string) {
+	var g globalFlags
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.Parse(args)
+	sendAndReport(g, "print", cmd, printPayload(cmd, ""), cmd)
+}
+
+func cmdStop(args []string) {
+	var g globalFlags
+	var yes bool
+	fs := flag.NewFlagSet("stop", flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
+	fs.Parse(args)
+	if !yes {
+		fmt.Print("Abort the current print? It cannot be resumed. [y/N] ")
+		var answer string
+		fmt.Fscanln(os.Stdin, &answer)
+		if !strings.EqualFold(strings.TrimSpace(answer), "y") {
+			fmt.Println("not stopping.")
+			return
+		}
+	}
+	sendAndReport(g, "print", "stop", printPayload("stop", ""), "stop")
+}
+
+var speedLevels = map[string]string{
+	"silent": "1", "standard": "2", "sport": "3", "ludicrous": "4",
+	"1": "1", "2": "2", "3": "3", "4": "4",
+}
+
+func cmdSpeed(args []string) {
+	var g globalFlags
+	fs := flag.NewFlagSet("speed", flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.Parse(args)
+	level := strings.ToLower(fs.Arg(0))
+	param, ok := speedLevels[level]
+	if !ok {
+		fatal("usage: bambu-ctl speed <silent|standard|sport|ludicrous>")
+	}
+	sendAndReport(g, "print", "print_speed", printPayload("print_speed", param), "speed "+level)
+}
+
+func cmdLight(args []string) {
+	var g globalFlags
+	fs := flag.NewFlagSet("light", flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.Parse(args)
+	mode := strings.ToLower(fs.Arg(0))
+	if mode != "on" && mode != "off" {
+		fatal("usage: bambu-ctl light <on|off>")
+	}
+	payload := map[string]any{"system": map[string]any{
+		"sequence_id": "0", "command": "ledctrl", "led_node": "chamber_light",
+		"led_mode": mode, "led_on_time": 500, "led_off_time": 500,
+		"loop_times": 0, "interval_time": 0,
+	}}
+	sendAndReport(g, "system", "ledctrl", payload, "light "+mode)
+}
+
 func errPill(err error) waybar.Waybar {
 	fmt.Fprintln(os.Stderr, err)
 	return waybar.Waybar{
@@ -414,6 +505,11 @@ Subcommands:
            cookie from makerworld.com instead
   status   Human-readable printer state [--raw dumps the full report]
   waybar   One JSON line for the waybar pill; always exits 0
+  pause    Pause the current print
+  resume   Resume a paused print
+  stop     Abort the current print (asks first; --yes to skip)
+  speed    Set print speed: silent|standard|sport|ludicrous
+  light    Chamber light: on|off
 
 Global flags (all subcommands):
   --config <file>    Session file (default $HOME/.config/bambu-cloud.json)

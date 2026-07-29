@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -19,17 +20,16 @@ const Broker = "us.mqtt.bambulab.com:8883"
 // arrives). Hand-rolled to keep the repo dependency-light; a full client
 // library would be the bigger foreign codebase by far.
 
-// FetchReport connects as the session user, asks the printer (by serial)
-// for a full state push and returns the first report carrying print
-// progress, plus its raw JSON. ErrAuth means the token is stale;
-// ErrNoReport usually means the printer is powered off.
-func FetchReport(s *Session, serial string, timeout time.Duration) (*Report, []byte, error) {
+// dial opens a TLS connection to the broker, authenticates as the
+// session user and subscribes to the printer's report topic. The
+// returned conn has its deadline set to now+timeout.
+func dial(s *Session, serial string, timeout time.Duration) (*tls.Conn, error) {
 	user := s.MQTTUser
 	if user == "" {
 		var err error
 		if user, err = s.MQTTUsername(); err != nil {
 			if user, err = UsernameFromAPI(s.AccessToken); err != nil {
-				return nil, nil, fmt.Errorf("derive MQTT username: %w", err)
+				return nil, fmt.Errorf("derive MQTT username: %w", err)
 			}
 		}
 	}
@@ -37,36 +37,55 @@ func FetchReport(s *Session, serial string, timeout time.Duration) (*Report, []b
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := tls.DialWithDialer(dialer, "tcp", Broker, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect %s: %w", Broker, err)
+		return nil, fmt.Errorf("connect %s: %w", Broker, err)
 	}
-	defer conn.Close()
+	ok := false
+	defer func() {
+		if !ok {
+			conn.Close()
+		}
+	}()
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	clientID := fmt.Sprintf("bambu-ctl-%d", time.Now().UnixNano())
 	if err := writeConnect(conn, clientID, user, s.AccessToken); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	first, payload, err := readPacket(conn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read CONNACK: %w", err)
+		return nil, fmt.Errorf("read CONNACK: %w", err)
 	}
 	if first>>4 != 2 || len(payload) < 2 {
-		return nil, nil, fmt.Errorf("unexpected reply to CONNECT (type %d)", first>>4)
+		return nil, fmt.Errorf("unexpected reply to CONNECT (type %d)", first>>4)
 	}
 	switch payload[1] {
 	case 0: // accepted
 	case 4, 5: // bad user name or password / not authorized
-		return nil, nil, ErrAuth
+		return nil, ErrAuth
 	default:
-		return nil, nil, fmt.Errorf("broker refused connection (code %d)", payload[1])
+		return nil, fmt.Errorf("broker refused connection (code %d)", payload[1])
 	}
+	if err := writeSubscribe(conn, 1, "device/"+serial+"/report"); err != nil {
+		return nil, err
+	}
+	ok = true
+	return conn, nil
+}
 
-	reportTopic := "device/" + serial + "/report"
-	if err := writeSubscribe(conn, 1, reportTopic); err != nil {
+// FetchReport connects as the session user, asks the printer (by serial)
+// for a full state push and returns the first report carrying print
+// progress, plus its raw JSON. ErrAuth means the token is stale;
+// ErrNoReport usually means the printer is powered off.
+func FetchReport(s *Session, serial string, timeout time.Duration) (*Report, []byte, error) {
+	conn, err := dial(s, serial, timeout)
+	if err != nil {
 		return nil, nil, err
 	}
+	defer conn.Close()
+
+	reportTopic := "device/" + serial + "/report"
 	pushall := []byte(`{"pushing":{"sequence_id":"0","command":"pushall"}}`)
 	if err := writePublish(conn, "device/"+serial+"/request", pushall); err != nil {
 		return nil, nil, err
@@ -97,6 +116,67 @@ func FetchReport(s *Session, serial string, timeout time.Duration) (*Report, []b
 		}
 		writeDisconnect(conn)
 		return &rep, body, nil
+	}
+}
+
+// ErrNoAck means a command was published but the printer never echoed a
+// result — most often it is powered off.
+var ErrNoAck = errors.New("command sent, but no acknowledgement from the printer (off?)")
+
+// SendCommand publishes a control payload to the printer's request topic
+// and waits for the echoed result on the report topic. section/command
+// identify the ack to look for (e.g. "print"/"pause", "system"/"ledctrl").
+func SendCommand(s *Session, serial, section, command string, payload any, timeout time.Duration) error {
+	conn, err := dial(s, serial, timeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if err := writePublish(conn, "device/"+serial+"/request", body); err != nil {
+		return err
+	}
+
+	reportTopic := "device/" + serial + "/report"
+	for {
+		first, pkt, err := readPacket(conn)
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return ErrNoAck
+			}
+			return err
+		}
+		if first>>4 != 3 {
+			continue
+		}
+		topic, msg, err := parsePublish(first, pkt)
+		if err != nil || topic != reportTopic {
+			continue
+		}
+		var data map[string]json.RawMessage
+		if json.Unmarshal(msg, &data) != nil {
+			continue
+		}
+		var echo struct {
+			Command string `json:"command"`
+			Result  string `json:"result"`
+			Reason  string `json:"reason"`
+		}
+		if json.Unmarshal(data[section], &echo) != nil || echo.Command != command {
+			continue
+		}
+		writeDisconnect(conn)
+		if echo.Result != "" && !strings.EqualFold(echo.Result, "success") {
+			if echo.Reason != "" {
+				return fmt.Errorf("printer replied %q: %s", echo.Result, echo.Reason)
+			}
+			return fmt.Errorf("printer replied %q", echo.Result)
+		}
+		return nil
 	}
 }
 
