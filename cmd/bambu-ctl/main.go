@@ -90,8 +90,11 @@ func loadSession(g globalFlags) (*bambu.Session, string, error) {
 
 func cmdLogin(args []string) {
 	var g globalFlags
+	var useToken bool
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	addGlobal(fs, &g)
+	fs.BoolVar(&useToken, "token", false,
+		"Paste a browser-session token instead of password login (for Google/Apple SSO accounts, which Bambu's API login doesn't support)")
 	fs.Parse(args)
 
 	stdin := bufio.NewReader(os.Stdin)
@@ -104,44 +107,63 @@ func cmdLogin(args []string) {
 		return strings.TrimSpace(line)
 	}
 
-	email := prompt("Bambu account email: ")
-	fmt.Print("Password: ")
-	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		fatal("read password: %v", err)
-	}
-
-	res, err := bambu.LoginPassword(email, string(pw))
-	if err != nil {
-		fatal("login: %v", err)
-	}
-	token := res.AccessToken
-	switch {
-	case token != "":
-	case res.LoginType == "verifyCode":
-		if err := bambu.RequestEmailCode(email); err != nil {
-			fatal("request email code: %v", err)
+	var token string
+	if useToken {
+		// SSO accounts have no API-usable password; the `token` cookie a
+		// browser holds after a makerworld.com / bambulab.com login is the
+		// same cloud access token the API login would have issued.
+		fmt.Println("Log in at makerworld.com in a browser (Google/Apple is fine), then")
+		fmt.Println("copy the value of the `token` cookie (DevTools → Application → Cookies).")
+		token = strings.Trim(prompt("Paste token: "), `"' `)
+		if strings.Count(token, ".") != 2 {
+			fatal("that doesn't look like a JWT (expected three dot-separated parts) — wrong cookie?")
 		}
-		code := prompt("Verification code (check your email): ")
-		res, err := bambu.LoginCode(email, code)
+	} else {
+		email := prompt("Bambu account email: ")
+		fmt.Print("Password: ")
+		pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
 		if err != nil {
-			fatal("code login: %v", err)
+			fatal("read password: %v", err)
+		}
+
+		res, err := bambu.LoginPassword(email, string(pw))
+		if err != nil {
+			fatal("login: %v", err)
 		}
 		token = res.AccessToken
-	case res.LoginType == "tfa":
-		code := prompt("Two-factor code: ")
-		token, err = bambu.LoginTFA(res.TFAKey, code)
-		if err != nil {
-			fatal("tfa login: %v", err)
+		switch {
+		case token != "":
+		case res.LoginType == "verifyCode":
+			if err := bambu.RequestEmailCode(email); err != nil {
+				fatal("request email code: %v", err)
+			}
+			code := prompt("Verification code (check your email): ")
+			res, err := bambu.LoginCode(email, code)
+			if err != nil {
+				fatal("code login: %v", err)
+			}
+			token = res.AccessToken
+		case res.LoginType == "tfa":
+			code := prompt("Two-factor code: ")
+			token, err = bambu.LoginTFA(res.TFAKey, code)
+			if err != nil {
+				fatal("tfa login: %v", err)
+			}
+		}
+		if token == "" {
+			fatal("login failed: no token issued (loginType %q)", res.LoginType)
 		}
 	}
 	if token == "" {
-		fatal("login failed: no token issued (loginType %q)", res.LoginType)
+		fatal("empty token")
 	}
 
 	sess := &bambu.Session{AccessToken: token, Saved: time.Now().Unix(), Name: "P2S"}
 	devices, err := bambu.Devices(token)
+	if errors.Is(err, bambu.ErrAuth) {
+		fatal("the cloud rejected this token — copy it fresh and retry (%v)", err)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not list printers: %v\n", err)
 	}
@@ -350,7 +372,9 @@ func usage() {
 
 Subcommands:
   login    Email + password (or emailed code / 2FA); caches the cloud
-           token and the printer serial
+           token and the printer serial. Google/Apple SSO accounts have
+           no API password — use --token and paste the browser's "token"
+           cookie from makerworld.com instead
   status   Human-readable printer state [--raw dumps the full report]
   waybar   One JSON line for the waybar pill; always exits 0
 
