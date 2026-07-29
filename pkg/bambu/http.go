@@ -137,6 +137,42 @@ func LoginTFA(tfaKey, code string) (string, error) {
 	return "", fmt.Errorf("tfa login returned no token")
 }
 
+// UsernameFromAPI resolves the MQTT username ("u_<uid>") for tokens that
+// are not JWTs (the emailed-code login flow issues opaque tokens). Same
+// fallback ha-bambulab uses: the my/preference endpoint returns the uid.
+func UsernameFromAPI(token string) (string, error) {
+	req, err := http.NewRequest("GET", apiBase+"/v1/design-user-service/my/preference", nil)
+	if err != nil {
+		return "", err
+	}
+	for k, v := range apiHeaders {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", ErrAuth
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return "", fmt.Errorf("my/preference: HTTP %d: %s", resp.StatusCode, snippet)
+	}
+	var body struct {
+		UID json.Number `json:"uid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	if body.UID.String() == "" {
+		return "", fmt.Errorf("my/preference: no uid in response")
+	}
+	return "u_" + body.UID.String(), nil
+}
+
 // Device is one printer bound to the account.
 type Device struct {
 	DevID          string `json:"dev_id"`

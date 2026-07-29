@@ -24,6 +24,10 @@ type Session struct {
 	Serial      string `json:"serial"`
 	Name        string `json:"name"`
 	Saved       int64  `json:"saved"`
+	// MQTTUser caches the derived broker username ("u_<uid>"): tokens from
+	// some login flows (e.g. emailed-code) are opaque, not JWTs, and then
+	// the uid must be fetched from the API instead — see UsernameFromAPI.
+	MQTTUser string `json:"mqtt_user,omitempty"`
 }
 
 var (

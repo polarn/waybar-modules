@@ -24,9 +24,14 @@ const Broker = "us.mqtt.bambulab.com:8883"
 // progress, plus its raw JSON. ErrAuth means the token is stale;
 // ErrNoReport usually means the printer is powered off.
 func FetchReport(s *Session, serial string, timeout time.Duration) (*Report, []byte, error) {
-	user, err := s.MQTTUsername()
-	if err != nil {
-		return nil, nil, err
+	user := s.MQTTUser
+	if user == "" {
+		var err error
+		if user, err = s.MQTTUsername(); err != nil {
+			if user, err = UsernameFromAPI(s.AccessToken); err != nil {
+				return nil, nil, fmt.Errorf("derive MQTT username: %w", err)
+			}
+		}
 	}
 
 	dialer := &net.Dialer{Timeout: 10 * time.Second}

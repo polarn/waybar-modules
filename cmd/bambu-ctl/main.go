@@ -74,7 +74,8 @@ func sessionPath(g globalFlags) string {
 
 // loadSession + serial resolution shared by status/waybar.
 func loadSession(g globalFlags) (*bambu.Session, string, error) {
-	sess, err := bambu.LoadSession(sessionPath(g))
+	path := sessionPath(g)
+	sess, err := bambu.LoadSession(path)
 	if err != nil {
 		return nil, "", err
 	}
@@ -84,6 +85,20 @@ func loadSession(g globalFlags) (*bambu.Session, string, error) {
 	}
 	if serial == "" {
 		return nil, "", errors.New("no printer serial cached — rerun: bambu-ctl login")
+	}
+	// Sessions saved before mqtt_user existed (or by the Python prototype)
+	// lack the cached username; resolve and persist it once.
+	if sess.MQTTUser == "" {
+		user, err := sess.MQTTUsername()
+		if err != nil {
+			if user, err = bambu.UsernameFromAPI(sess.AccessToken); err != nil {
+				return nil, "", fmt.Errorf("derive MQTT username: %w", err)
+			}
+		}
+		sess.MQTTUser = user
+		if err := sess.Save(path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not persist mqtt_user: %v\n", err)
+		}
 	}
 	return sess, serial, nil
 }
@@ -179,6 +194,13 @@ func cmdLogin(args []string) {
 	}
 	if g.serial != "" {
 		sess.Serial = g.serial
+	}
+	if user, err := sess.MQTTUsername(); err == nil {
+		sess.MQTTUser = user
+	} else if user, err := bambu.UsernameFromAPI(token); err == nil {
+		sess.MQTTUser = user
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: could not derive MQTT username now (will retry on first status): %v\n", err)
 	}
 
 	path := sessionPath(g)
