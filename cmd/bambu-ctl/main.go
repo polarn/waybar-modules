@@ -340,13 +340,28 @@ func summaryLines(rep *bambu.Report) []string {
 	}
 	if len(p.AMS.AMS) > 0 {
 		unit := p.AMS.AMS[0]
-		lines = append(lines, fmt.Sprintf("ams:       humidity idx %d, temp %d °C",
-			unit.Humidity.Int(), unit.Temp.Int()))
+		// Prefer real %RH (AMS 2 Pro+); older units only have the 1-5 index.
+		hum := fmt.Sprintf("humidity idx %d", unit.Humidity.Int())
+		if unit.HumidityRaw != nil {
+			hum = fmt.Sprintf("humidity %d%%", unit.HumidityRaw.Int())
+		}
+		line := fmt.Sprintf("ams:       %s, temp %d °C", hum, unit.Temp.Int())
+		if unit.HumidityRaw.Int() > 40 {
+			line += " — high, consider drying"
+		}
+		lines = append(lines, line)
+		if unit.DryTime.Int() > 0 {
+			lines = append(lines, fmt.Sprintf("drying:    %d min left", unit.DryTime.Int()))
+		}
 		for i, tray := range unit.Tray {
-			if tray.TrayType == "" {
+			name := tray.TraySubBrands
+			if name == "" {
+				name = tray.TrayType
+			}
+			if name == "" {
 				continue
 			}
-			line := fmt.Sprintf("slot %d:    %s", i+1, tray.TrayType)
+			line := fmt.Sprintf("slot %d:    %s", i+1, name)
 			if tray.TrayColor != "" {
 				color := tray.TrayColor
 				if len(color) > 6 {

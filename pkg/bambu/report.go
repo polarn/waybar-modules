@@ -21,12 +21,16 @@ type Report struct {
 		ChamberTemper   *Num   `json:"chamber_temper"`
 		AMS             struct {
 			AMS []struct {
-				Humidity *Num `json:"humidity"`
-				Temp     *Num `json:"temp"`
-				Tray     []struct {
-					TrayType  string `json:"tray_type"`
-					TrayColor string `json:"tray_color"`
-					Remain    *Num   `json:"remain"`
+				Humidity *Num `json:"humidity"` // coarse 1-5 index (all AMS models)
+				// HumidityRaw is actual %RH — AMS 2 Pro and newer only.
+				HumidityRaw *Num `json:"humidity_raw"`
+				Temp        *Num `json:"temp"`
+				DryTime     *Num `json:"dry_time"` // minutes left of an active drying run
+				Tray        []struct {
+					TrayType      string `json:"tray_type"`
+					TraySubBrands string `json:"tray_sub_brands"` // e.g. "PLA Basic"
+					TrayColor     string `json:"tray_color"`
+					Remain        *Num   `json:"remain"`
 				} `json:"tray"`
 			} `json:"ams"`
 		} `json:"ams"`
