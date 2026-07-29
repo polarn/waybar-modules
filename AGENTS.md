@@ -11,6 +11,8 @@ A subset of modules also support a `--swiftbar` flag for use as macOS [SwiftBar]
 - `cmd/waybar-gitlab-mr/` - Displays count of GitLab merge requests awaiting review
 - `cmd/waybar-github-pr/` - Displays count of approved GitHub PRs ready to merge, with rofi-based click-to-open. SwiftBar-enabled.
 - `cmd/waybar-wiim-nowplaying/` - Displays now-playing info from a WiiM device (amp/mini/pro). SwiftBar-enabled.
+- `cmd/bambu-ctl/` - Bambu Lab cloud CLI (`login`/`status`/`waybar`); feeds the custom/p2s printer pill
+- `pkg/bambu/` - Bambu cloud client: HTTP login flow, session cache, and a hand-rolled minimal MQTT 3.1.1 fetch (no client library — the exchange is one subscribe + one publish, QoS 0)
 - `pkg/waybar/` - Shared `Waybar` struct with JSON output and `Print()` method
 
 ## Building
@@ -107,6 +109,24 @@ Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
 ### SwiftBar mode
 
 `--swiftbar` implies `--notify=false` (no `notify-send` on macOS) and skips the `$XDG_RUNTIME_DIR` cache write (the `--open` flow isn't used). Title is `approved·total :arrow.triangle.pull:`, with a `:bell.badge:` variant when there are unread notifications. Dropdown is a single `Open PRs | href=https://github.com/pulls` row — no per-PR list (intentionally simple; can be extended later by adding a list subcommand).
+
+## bambu-ctl module details
+
+### Why cloud, not local
+
+Bambu's P2S-generation printers only serve local MQTT when LAN-only mode + Developer Mode are enabled (which kills the Handy app / MakerWorld cloud features). `bambu-ctl` therefore reads state from Bambu's cloud broker (`us.mqtt.bambulab.com:8883`) with the account's access token — the same channel Handy uses — so the printer stays in Cloud mode.
+
+### Auth flow
+
+`bambu-ctl login`: POST `/v1/user-service/user/login` on `api.bambulab.com` with OrcaSlicer-mimicking headers (Bambu's risk control rejects unknown clients). Response may demand an emailed code (`loginType: verifyCode` → `/user/sendemail/code`) or 2FA (`loginType: tfa` → `/user/tfa/login`, token in the `token` cookie). The JWT's `username` claim (`u_<uid>`) is the MQTT username; the token itself is the password. Session cached in `~/.config/bambu-cloud.json` (0600), expires ~3 months → the pill's `reauth` class.
+
+### Status fetch
+
+Subscribe `device/<serial>/report`, publish `{"pushing":{"command":"pushall"}}` to `device/<serial>/request`, take the first report containing `mc_percent` (partial pushes lack it). The printer rate-limits pushall (~1/min) — the waybar module polls at 120 s for headroom. Report fields mix numbers and numeric strings across firmwares; `pkg/bambu.Num` tolerates both.
+
+### Pill states
+
+`printing` (green, `% + min left`) / `paused` / `failed` / `idle` (nozzle °C) / `offline` (dim, printer off) / `setup`+`reauth` (mauve, login needed) / `error`. CSS classes live in the chezmoi waybar style.css.
 
 ## Adding a new module
 
