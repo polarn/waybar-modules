@@ -343,14 +343,21 @@ func summaryLines(rep *bambu.Report) []string {
 	}
 	lines := []string{
 		"state:     " + state,
-		"job:       " + job,
+	}
+	// The status line the printer's own display shows ("heating hotend",
+	// "paused filament runout", ...); hidden when idle or plain printing.
+	if p.StgCur != nil && !bambu.StageIdle(p.StgCur.Int()) {
+		lines = append(lines, "stage:     "+bambu.StageName(p.StgCur.Int()))
+	}
+	lines = append(lines,
+		"job:       "+job,
 		fmt.Sprintf("progress:  %d%%  (layer %d/%d, %d min left)",
 			p.McPercent.Int(), p.LayerNum.Int(), p.TotalLayerNum.Int(),
 			p.McRemainingTime.Int()),
 		fmt.Sprintf("nozzle:    %d °C", p.NozzleTemper.Int()),
 		fmt.Sprintf("bed:       %d °C", p.BedTemper.Int()),
 		fmt.Sprintf("chamber:   %d °C", p.ChamberTemper.Int()),
-	}
+	)
 	if len(p.AMS.AMS) > 0 {
 		unit := p.AMS.AMS[0]
 		// Prefer real %RH (AMS 2 Pro+); older units only have the 1-5 index.

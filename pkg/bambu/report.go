@@ -12,6 +12,8 @@ type Report struct {
 	Print struct {
 		GcodeState      string `json:"gcode_state"`
 		SubtaskName     string `json:"subtask_name"`
+		StgCur          *Num   `json:"stg_cur"` // current stage — see StageName
+
 		McPercent       *Num   `json:"mc_percent"`
 		McRemainingTime *Num   `json:"mc_remaining_time"`
 		LayerNum        *Num   `json:"layer_num"`
