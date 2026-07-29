@@ -58,6 +58,8 @@ func main() {
 		cmdWaybar(os.Args[2:])
 	case "pause", "resume":
 		cmdSimplePrint(os.Args[1], os.Args[2:])
+	case "toggle":
+		cmdToggle(os.Args[2:])
 	case "stop":
 		cmdStop(os.Args[2:])
 	case "speed":
@@ -415,6 +417,35 @@ func cmdSimplePrint(cmd string, args []string) {
 	sendAndReport(g, "print", cmd, printPayload(cmd, ""), cmd)
 }
 
+// cmdToggle pauses a running print or resumes a paused one — made for
+// the pill's right-click, so "nothing to do" exits 0 quietly.
+func cmdToggle(args []string) {
+	var g globalFlags
+	fs := flag.NewFlagSet("toggle", flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.Parse(args)
+
+	sess, serial, err := loadSession(g)
+	if err != nil {
+		fatal("%v", err)
+	}
+	rep, _, err := bambu.FetchReport(sess, serial, 15*time.Second)
+	if err != nil {
+		fatal("%v", err)
+	}
+	var cmd string
+	switch state := strings.ToUpper(rep.Print.GcodeState); state {
+	case "RUNNING", "PREPARE":
+		cmd = "pause"
+	case "PAUSE":
+		cmd = "resume"
+	default:
+		fmt.Printf("nothing to toggle (state %s)\n", state)
+		return
+	}
+	sendAndReport(g, "print", cmd, printPayload(cmd, ""), cmd)
+}
+
 func cmdStop(args []string) {
 	var g globalFlags
 	var yes bool
@@ -507,6 +538,7 @@ Subcommands:
   waybar   One JSON line for the waybar pill; always exits 0
   pause    Pause the current print
   resume   Resume a paused print
+  toggle   Pause if printing, resume if paused (for the pill's right-click)
   stop     Abort the current print (asks first; --yes to skip)
   speed    Set print speed: silent|standard|sport|ludicrous
   light    Chamber light: on|off
