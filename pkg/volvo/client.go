@@ -181,6 +181,30 @@ func (c *Client) Connected(vin, leaf string) (CVMap, error) {
 	return out.Data, nil
 }
 
+// CommandResult is the response to a Connected Vehicle v2 command
+// invocation. InvokeStatus values like COMPLETED / RUNNING / DELIVERED
+// mean the car took (or is taking) the command; REJECTED, TIMEOUT,
+// CONNECTION_FAILURE etc. mean it did not.
+type CommandResult struct {
+	VIN          string `json:"vin"`
+	InvokeStatus string `json:"invokeStatus"`
+	Message      string `json:"message"`
+}
+
+// Command invokes a Connected Vehicle v2 command (for this tool only
+// "climatization-start" / "climatization-stop" — the sole action scope
+// we request). Requires the matching conve:* scope on both the portal
+// app and the consent grant.
+func (c *Client) Command(vin, command string) (*CommandResult, error) {
+	var out struct {
+		Data CommandResult `json:"data"`
+	}
+	if err := c.post("/connected-vehicle/v2/vehicles/"+url.PathEscape(vin)+"/commands/"+command, &out); err != nil {
+		return nil, err
+	}
+	return &out.Data, nil
+}
+
 // Vehicles lists the VINs registered to the authenticated Volvo ID.
 func (c *Client) Vehicles() ([]string, error) {
 	var out struct {
@@ -198,14 +222,20 @@ func (c *Client) Vehicles() ([]string, error) {
 	return vins, nil
 }
 
-// get issues an authenticated GET. On a 401 (token revoked server-side
-// despite a fresh-looking expiry) it forces one refresh and retries.
-func (c *Client) get(path string, out any) error {
+// get issues an authenticated GET; post an authenticated body-less
+// POST (the command endpoints take no payload for our uses).
+func (c *Client) get(path string, out any) error  { return c.call(http.MethodGet, path, out) }
+func (c *Client) post(path string, out any) error { return c.call(http.MethodPost, path, out) }
+
+// call issues an authenticated request. On a 401 (token revoked
+// server-side despite a fresh-looking expiry) it forces one refresh
+// and retries.
+func (c *Client) call(method, path string, out any) error {
 	tok, err := c.accessToken(false)
 	if err != nil {
 		return err
 	}
-	status, body, err := c.doGet(path, tok)
+	status, body, err := c.doReq(method, path, tok)
 	if err != nil {
 		return err
 	}
@@ -213,21 +243,21 @@ func (c *Client) get(path string, out any) error {
 		if tok, err = c.accessToken(true); err != nil {
 			return err
 		}
-		if status, body, err = c.doGet(path, tok); err != nil {
+		if status, body, err = c.doReq(method, path, tok); err != nil {
 			return err
 		}
 	}
 	if status == http.StatusForbidden {
-		return fmt.Errorf("GET %s: %w", path, ErrForbidden)
+		return fmt.Errorf("%s %s: %w", method, path, ErrForbidden)
 	}
-	if status != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d: %s", path, status, truncate(body, 200))
+	if status < 200 || status > 299 {
+		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, status, truncate(body, 200))
 	}
 	return json.Unmarshal(body, out)
 }
 
-func (c *Client) doGet(path, token string) (int, []byte, error) {
-	req, err := http.NewRequest(http.MethodGet, c.BaseURL+path, nil)
+func (c *Client) doReq(method, path, token string) (int, []byte, error) {
+	req, err := http.NewRequest(method, c.BaseURL+path, nil)
 	if err != nil {
 		return 0, nil, err
 	}

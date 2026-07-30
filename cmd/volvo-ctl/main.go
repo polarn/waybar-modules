@@ -7,6 +7,7 @@
 //   volvo-ctl vehicles   # emit JSONL of VINs on the account
 //   volvo-ctl status     # human-readable battery/charging state
 //   volvo-ctl location   # last GPS fix + map links (needs location:read)
+//   volvo-ctl climate    # start/stop pre-climatization: climate <start|stop>
 //   volvo-ctl waybar     # one compact JSON line for waybar; always exits 0
 //
 // Config: ~/.config/volvo/config.json {client_id, client_secret,
@@ -66,6 +67,8 @@ func main() {
 		cmdStatus(os.Args[2:])
 	case "location":
 		cmdLocation(os.Args[2:])
+	case "climate":
+		cmdClimate(os.Args[2:])
 	case "waybar":
 		cmdWaybar(os.Args[2:])
 	case "-h", "--help", "help":
@@ -251,6 +254,45 @@ func cmdLocation(args []string) {
 	fmt.Printf("Google: https://www.google.com/maps?q=%.6f,%.6f\n", loc.Lat, loc.Lon)
 	if open {
 		_ = exec.Command("xdg-open", osm).Start()
+	}
+}
+
+// cmdClimate is the tool's only car-actuating command; everything else
+// is read-only by design (see the scopes const in pkg/volvo).
+func cmdClimate(args []string) {
+	var g globalFlags
+	fs := flag.NewFlagSet("climate", flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.Parse(args)
+	action := fs.Arg(0)
+	if action != "start" && action != "stop" {
+		fatal("usage: volvo-ctl climate <start|stop>")
+	}
+
+	cfg, c, err := loadAll(g)
+	if err != nil {
+		fatal("%v", err)
+	}
+	vin, err := resolveVIN(g, cfg, c)
+	if err != nil {
+		fatal("%v", err)
+	}
+	res, err := c.Command(vin, "climatization-"+action)
+	if err != nil {
+		if errors.Is(err, volvo.ErrForbidden) {
+			fatal("climate: %v\nhint: the app/consent lacks conve:climatization_start_stop — re-run: volvo-ctl auth", err)
+		}
+		fatal("climate: %v", err)
+	}
+	msg := res.InvokeStatus
+	if res.Message != "" {
+		msg += " (" + res.Message + ")"
+	}
+	fmt.Printf("Climatization %s: %s\n", action, msg)
+	switch res.InvokeStatus {
+	case "COMPLETED", "RUNNING", "DELIVERED", "WAITING":
+	default:
+		os.Exit(1)
 	}
 }
 
@@ -659,6 +701,7 @@ Subcommands:
   vehicles   Emit one JSON per VIN to stdout
   status     Human-readable battery/charging state [--vin <vin>]
   location   Last GPS fix + map links [--vin <vin>] [--open]
+  climate    Start/stop pre-climatization: climate <start|stop>
   waybar     One JSON line for the waybar pill; always exits 0
 
 Global flags (all subcommands):

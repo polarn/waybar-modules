@@ -233,6 +233,34 @@ func TestConnectedParsing(t *testing.T) {
 	}
 }
 
+func TestCommandInvocation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/connected-vehicle/v2/vehicles/VIN123/commands/climatization-start" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if r.Header.Get("vcc-api-key") != "key" {
+			t.Errorf("missing vcc-api-key header")
+		}
+		fmt.Fprint(w, `{"data": {"vin": "VIN123", "invokeStatus": "COMPLETED", "message": ""}}`)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	res, err := c.Command("VIN123", "climatization-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.InvokeStatus != "COMPLETED" {
+		t.Errorf("invokeStatus = %q, want COMPLETED", res.InvokeStatus)
+	}
+	if res.VIN != "VIN123" {
+		t.Errorf("vin = %q, want VIN123", res.VIN)
+	}
+}
+
 func TestForbiddenMapsToErrForbidden(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
