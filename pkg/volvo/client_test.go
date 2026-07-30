@@ -75,6 +75,24 @@ const xc40Fixture = `{
   }
 }`
 
+// locationFixture is a Location API v1 response in the same GeoJSON
+// Feature shape as Home Assistant core's location.json fixture
+// (coordinates are [lon, lat, alt] — order matters), with hand-picked
+// central-Stockholm values.
+const locationFixture = `{
+  "data": {
+    "type": "Feature",
+    "geometry": {
+      "type": "Point",
+      "coordinates": [18.07107, 59.32513, 12.5]
+    },
+    "properties": {
+      "heading": "245",
+      "timestamp": "2026-07-30T11:22:33Z"
+    }
+  }
+}`
+
 // testClient returns a Client with fresh valid tokens on disk, pointed
 // at the given API and token servers.
 func testClient(t *testing.T, apiURL, tokURL string) *Client {
@@ -137,6 +155,54 @@ func TestEnergyStateParsing(t *testing.T) {
 	want := time.Date(2025, 7, 2, 8, 51, 23, 0, time.UTC)
 	if !st.BatteryChargeLevel.UpdatedAt.Equal(want) {
 		t.Errorf("updatedAt = %v, want %v", st.BatteryChargeLevel.UpdatedAt, want)
+	}
+}
+
+func TestLocationParsing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/location/v1/vehicles/VIN123/location" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if r.Header.Get("vcc-api-key") != "key" {
+			t.Errorf("missing vcc-api-key header")
+		}
+		if r.Header.Get("Authorization") != "Bearer AT-valid" {
+			t.Errorf("bad Authorization header %q", r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, locationFixture)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	loc, err := c.Location("VIN123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Lat/lon must come out of the [lon, lat, alt] array in this order.
+	if loc.Lat != 59.32513 || loc.Lon != 18.07107 {
+		t.Errorf("position = %v, %v; want 59.32513, 18.07107", loc.Lat, loc.Lon)
+	}
+	if loc.Heading != "245" {
+		t.Errorf("heading = %q, want 245", loc.Heading)
+	}
+	want := time.Date(2026, 7, 30, 11, 22, 33, 0, time.UTC)
+	if !loc.Timestamp.Equal(want) {
+		t.Errorf("timestamp = %v, want %v", loc.Timestamp, want)
+	}
+}
+
+func TestForbiddenMapsToErrForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"status":403,"error":{"message":"FORBIDDEN","description":"Access is denied"}}`)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	_, err := c.Location("VIN123")
+	if !errors.Is(err, ErrForbidden) {
+		t.Errorf("err = %v, want ErrForbidden", err)
 	}
 }
 

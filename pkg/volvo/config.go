@@ -24,9 +24,11 @@ const (
 	authorizeURL = "https://volvoid.eu.volvocars.com/as/authorization.oauth2"
 	tokenURL     = "https://volvoid.eu.volvocars.com/as/token.oauth2"
 
-	// scopes covers VIN discovery plus the Energy API v2 reads. Personal
-	// apps must be published with (at least) these scopes selected.
-	scopes = "openid conve:vehicle_relation energy:state:read energy:capability:read"
+	// scopes covers VIN discovery, the Energy API v2 reads, and the
+	// Location API. Personal apps must be published with (at least)
+	// these scopes selected; widening the set means re-publishing the
+	// app AND re-running `volvo-ctl auth` for a consent that carries it.
+	scopes = "openid conve:vehicle_relation energy:state:read energy:capability:read location:read"
 )
 
 // ErrNoConfig means the config file is missing or still holds

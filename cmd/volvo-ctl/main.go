@@ -6,6 +6,7 @@
 //   volvo-ctl auth       # one-time (and ~weekly) browser login, stores tokens
 //   volvo-ctl vehicles   # emit JSONL of VINs on the account
 //   volvo-ctl status     # human-readable battery/charging state
+//   volvo-ctl location   # last GPS fix + map links (needs location:read)
 //   volvo-ctl waybar     # one compact JSON line for waybar; always exits 0
 //
 // Config: ~/.config/volvo/config.json {client_id, client_secret,
@@ -18,7 +19,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +57,8 @@ func main() {
 		cmdVehicles(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
+	case "location":
+		cmdLocation(os.Args[2:])
 	case "waybar":
 		cmdWaybar(os.Args[2:])
 	case "-h", "--help", "help":
@@ -198,6 +203,46 @@ func cmdStatus(args []string) {
 	}
 }
 
+func cmdLocation(args []string) {
+	var g globalFlags
+	var open bool
+	fs := flag.NewFlagSet("location", flag.ExitOnError)
+	addGlobal(fs, &g)
+	fs.BoolVar(&open, "open", false, "Open the position on OpenStreetMap (xdg-open)")
+	fs.Parse(args)
+
+	cfg, c, err := loadAll(g)
+	if err != nil {
+		fatal("%v", err)
+	}
+	vin, err := resolveVIN(g, cfg, c)
+	if err != nil {
+		fatal("%v", err)
+	}
+	loc, err := c.Location(vin)
+	if err != nil {
+		if errors.Is(err, volvo.ErrForbidden) {
+			fatal("location: %v\nhint: the app lacks the location:read scope — add it on developer.volvocars.com, then re-run: volvo-ctl auth", err)
+		}
+		fatal("location: %v", err)
+	}
+	osm := fmt.Sprintf("https://www.openstreetmap.org/?mlat=%.6f&mlon=%.6f#map=16/%.6f/%.6f",
+		loc.Lat, loc.Lon, loc.Lat, loc.Lon)
+	fmt.Printf("VIN: %s\n", vin)
+	fmt.Printf("Position: %.6f, %.6f\n", loc.Lat, loc.Lon)
+	if h := compass(loc.Heading); h != "" {
+		fmt.Printf("Heading: %s\n", h)
+	}
+	if !loc.Timestamp.IsZero() {
+		fmt.Printf("Fix age: %s (car reports opportunistically)\n", formatAge(loc.Age(time.Now())))
+	}
+	fmt.Printf("OSM: %s\n", osm)
+	fmt.Printf("Google: https://www.google.com/maps?q=%.6f,%.6f\n", loc.Lat, loc.Lon)
+	if open {
+		_ = exec.Command("xdg-open", osm).Start()
+	}
+}
+
 // cmdWaybar prints exactly one compact JSON line and always exits 0 —
 // a bad exit or garbage output would blank or break the pill. Errors
 // are additionally logged to stderr, which waybar forwards to the
@@ -252,10 +297,18 @@ func buildWaybar(g globalFlags) waybar.Waybar {
 	if charging {
 		icon += iconBolt
 	}
+	tooltip := "<b>Volvo XC40 · " + escapePango(vin) + "</b>\n" + escapePango(strings.Join(summaryLines(st), "\n"))
+	// Location is garnish: any failure (typically ErrForbidden before
+	// the scope/consent exists) leaves the pill battery-only.
+	if loc, lerr := c.Location(vin); lerr == nil {
+		tooltip += "\n" + escapePango(strings.Join(locationLines(loc), "\n"))
+	} else if !errors.Is(lerr, volvo.ErrForbidden) {
+		fmt.Fprintln(os.Stderr, lerr)
+	}
 	return waybar.Waybar{
 		Text:    fmt.Sprintf("%s %d%%", icon, pct),
 		Class:   classify(pct, charging),
-		ToolTip: "<b>Volvo XC40 · " + escapePango(vin) + "</b>\n" + escapePango(strings.Join(summaryLines(st), "\n")),
+		ToolTip: tooltip,
 	}
 }
 
@@ -316,6 +369,38 @@ func summaryLines(st *volvo.EnergyState) []string {
 		lines = append(lines, fmt.Sprintf("Data age: %s (car reports opportunistically)", formatAge(age)))
 	}
 	return lines
+}
+
+// locationLines renders the GPS fix for the tooltip — a sibling of
+// summaryLines so `status` stays location-free (it has its own richer
+// `location` subcommand).
+func locationLines(loc *volvo.Location) []string {
+	var lines []string
+	pos := fmt.Sprintf("%.5f, %.5f", loc.Lat, loc.Lon)
+	if !loc.Timestamp.IsZero() {
+		lines = append(lines, fmt.Sprintf("Last seen: %s ago · %s", formatAge(loc.Age(time.Now())), pos))
+	} else {
+		lines = append(lines, "Position: "+pos)
+	}
+	if h := compass(loc.Heading); h != "" {
+		lines = append(lines, "Heading: "+h)
+	}
+	return lines
+}
+
+// compass renders an API heading (degrees as a string, may be empty or
+// junk) as a compass point; empty string when unparsable.
+func compass(heading string) string {
+	deg, err := strconv.ParseFloat(strings.TrimSpace(heading), 64)
+	if err != nil {
+		return ""
+	}
+	points := []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"}
+	idx := int(deg/45+0.5) % 8
+	if idx < 0 {
+		idx += 8
+	}
+	return fmt.Sprintf("%s (%.0f°)", points[idx], deg)
 }
 
 func formatMinutes(min int) string {
@@ -384,6 +469,7 @@ Subcommands:
              [--redirect-port N] [--no-browser]
   vehicles   Emit one JSON per VIN to stdout
   status     Human-readable battery/charging state [--vin <vin>]
+  location   Last GPS fix + map links [--vin <vin>] [--open]
   waybar     One JSON line for the waybar pill; always exits 0
 
 Global flags (all subcommands):

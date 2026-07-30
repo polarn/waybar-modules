@@ -3,6 +3,7 @@ package volvo
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,12 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrForbidden is a 403 from the API — in practice the app or the
+// user's consent grant lacks a scope for the endpoint (e.g.
+// location:read), not a broken login, so it is distinct from
+// ErrReauthNeeded.
+var ErrForbidden = errors.New("volvo: access denied (missing API scope?)")
 
 // Client is an authenticated Volvo cloud API client. BaseURL and
 // TokenURL default to the production endpoints; tests override them
@@ -101,6 +108,50 @@ func (c *Client) EnergyState(vin string) (*EnergyState, error) {
 	return &st, nil
 }
 
+// Location is the Location API v1 GPS fix.
+type Location struct {
+	Lat       float64
+	Lon       float64
+	Heading   string // degrees as sent by the API; may be empty
+	Timestamp time.Time
+}
+
+// Age is how stale the fix is — like energy data, it only moves when
+// the car reports opportunistically.
+func (l Location) Age(now time.Time) time.Duration { return now.Sub(l.Timestamp) }
+
+// Location fetches the vehicle's last-reported GPS position. Requires
+// the location:read scope on both the portal app and the current
+// consent grant; without it the API answers 403 (ErrForbidden).
+func (c *Client) Location(vin string) (*Location, error) {
+	// The response is a GeoJSON Feature wrapped in {"data": ...};
+	// coordinates arrive [lon, lat, alt].
+	var out struct {
+		Data struct {
+			Geometry struct {
+				Coordinates []float64 `json:"coordinates"`
+			} `json:"geometry"`
+			Properties struct {
+				Heading   string    `json:"heading"`
+				Timestamp time.Time `json:"timestamp"`
+			} `json:"properties"`
+		} `json:"data"`
+	}
+	if err := c.get("/location/v1/vehicles/"+url.PathEscape(vin)+"/location", &out); err != nil {
+		return nil, err
+	}
+	coords := out.Data.Geometry.Coordinates
+	if len(coords) < 2 {
+		return nil, fmt.Errorf("location: malformed coordinates (%d values)", len(coords))
+	}
+	return &Location{
+		Lon:       coords[0],
+		Lat:       coords[1],
+		Heading:   out.Data.Properties.Heading,
+		Timestamp: out.Data.Properties.Timestamp,
+	}, nil
+}
+
 // Vehicles lists the VINs registered to the authenticated Volvo ID.
 func (c *Client) Vehicles() ([]string, error) {
 	var out struct {
@@ -136,6 +187,9 @@ func (c *Client) get(path string, out any) error {
 		if status, body, err = c.doGet(path, tok); err != nil {
 			return err
 		}
+	}
+	if status == http.StatusForbidden {
+		return fmt.Errorf("GET %s: %w", path, ErrForbidden)
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("GET %s: HTTP %d: %s", path, status, truncate(body, 200))
