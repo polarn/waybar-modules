@@ -25,8 +25,9 @@ const (
 	tokenURL     = "https://volvoid.eu.volvocars.com/as/token.oauth2"
 
 	// scopes covers VIN discovery, the Energy API v2 reads, the
-	// Location API, and the Connected Vehicle v2 read endpoints
-	// (deliberately not conve:commands — this tool is read-only).
+	// Location API, and the Connected Vehicle v2 read endpoints. The
+	// only action scope is climatization start/stop — deliberately no
+	// conve:commands/lock/unlock; everything else stays read-only.
 	// Personal apps must be published with (at least) these scopes
 	// selected — scopes are fixed at publication, so a widened set
 	// means a NEW portal app plus a `volvo-ctl auth` re-run.
@@ -34,6 +35,7 @@ const (
 		" conve:doors_status conve:lock_status conve:windows_status" +
 		" conve:engine_status conve:odometer_status conve:tyre_status" +
 		" conve:warnings conve:diagnostics_workshop conve:trip_statistics" +
+		" conve:climatization_start_stop" +
 		" energy:state:read energy:capability:read location:read"
 )
 
