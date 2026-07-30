@@ -192,6 +192,47 @@ func TestLocationParsing(t *testing.T) {
 	}
 }
 
+// doorsFixture is a Connected Vehicle v2 /doors response in the same
+// shape as Home Assistant core's doors.json fixture.
+const doorsFixture = `{
+  "data": {
+    "centralLock": {"value": "LOCKED", "timestamp": "2026-07-30T11:22:33Z"},
+    "frontLeftDoor": {"value": "CLOSED", "timestamp": "2026-07-30T11:22:33Z"},
+    "frontRightDoor": {"value": "OPEN", "timestamp": "2026-07-30T11:22:33Z"},
+    "hood": {"value": "CLOSED", "timestamp": "2026-07-30T11:22:33Z"},
+    "tailgate": {"value": "UNSPECIFIED", "timestamp": "2026-07-30T11:22:33Z"}
+  }
+}`
+
+func TestConnectedParsing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/connected-vehicle/v2/vehicles/VIN123/doors" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		fmt.Fprint(w, doorsFixture)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	m, err := c.Connected("VIN123", "doors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 5 {
+		t.Errorf("fields = %d, want 5", len(m))
+	}
+	if got := string(m["centralLock"].Value); got != "LOCKED" {
+		t.Errorf("centralLock = %q, want LOCKED", got)
+	}
+	if got := string(m["frontRightDoor"].Value); got != "OPEN" {
+		t.Errorf("frontRightDoor = %q, want OPEN", got)
+	}
+	want := time.Date(2026, 7, 30, 11, 22, 33, 0, time.UTC)
+	if !m["hood"].Timestamp.Equal(want) {
+		t.Errorf("hood timestamp = %v, want %v", m["hood"].Timestamp, want)
+	}
+}
+
 func TestForbiddenMapsToErrForbidden(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

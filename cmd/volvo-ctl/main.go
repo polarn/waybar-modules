@@ -21,8 +21,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/polarn/waybar-modules/pkg/volvo"
@@ -35,6 +37,11 @@ const (
 	iconCar  = "\U000F0B6C" // nf-md-car_electric
 	iconBolt = "\U000F140B" // nf-md-lightning_bolt
 )
+
+// connectedLeaves are the Connected Vehicle v2 resources consulted for
+// the tooltip's anomaly lines; `status` additionally pulls odometer
+// and trip statistics.
+var connectedLeaves = []string{"doors", "windows", "engine-status", "tyres", "warnings", "diagnostics"}
 
 type globalFlags struct {
 	configDir string
@@ -201,6 +208,10 @@ func cmdStatus(args []string) {
 	for _, line := range summaryLines(st) {
 		fmt.Println(line)
 	}
+	cv := fetchConnected(c, vin, append([]string{"odometer", "statistics"}, connectedLeaves...))
+	for _, line := range statusCarLines(cv) {
+		fmt.Println(line)
+	}
 }
 
 func cmdLocation(args []string) {
@@ -305,6 +316,9 @@ func buildWaybar(g globalFlags) waybar.Waybar {
 	} else if !errors.Is(lerr, volvo.ErrForbidden) {
 		fmt.Fprintln(os.Stderr, lerr)
 	}
+	if lines := carLines(fetchConnected(c, vin, connectedLeaves)); len(lines) > 0 {
+		tooltip += "\n" + escapePango(strings.Join(lines, "\n"))
+	}
 	return waybar.Waybar{
 		Text:    fmt.Sprintf("%s %d%%", icon, pct),
 		Class:   classify(pct, charging),
@@ -369,6 +383,181 @@ func summaryLines(st *volvo.EnergyState) []string {
 		lines = append(lines, fmt.Sprintf("Data age: %s (car reports opportunistically)", formatAge(age)))
 	}
 	return lines
+}
+
+// fetchConnected pulls the given Connected Vehicle leaves concurrently.
+// Each leaf is garnish: a missing scope (ErrForbidden — e.g. an older
+// portal app) drops the leaf silently, other errors are logged to
+// stderr, and callers just see an absent map entry either way.
+func fetchConnected(c *volvo.Client, vin string, leaves []string) map[string]volvo.CVMap {
+	cv := make(map[string]volvo.CVMap, len(leaves))
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	for _, leaf := range leaves {
+		wg.Add(1)
+		go func(leaf string) {
+			defer wg.Done()
+			m, err := c.Connected(vin, leaf)
+			if err != nil {
+				if !errors.Is(err, volvo.ErrForbidden) {
+					fmt.Fprintln(os.Stderr, err)
+				}
+				return
+			}
+			mu.Lock()
+			cv[leaf] = m
+			mu.Unlock()
+		}(leaf)
+	}
+	wg.Wait()
+	return cv
+}
+
+// openParts collects the human-readable names of open doors/windows.
+// skip names a field to ignore (doors carry centralLock alongside the
+// actual doors).
+func openParts(m volvo.CVMap, skip string) []string {
+	var open []string
+	for k, f := range m {
+		if k != skip && openish(string(f.Value)) {
+			open = append(open, humanKey(k))
+		}
+	}
+	sort.Strings(open)
+	return open
+}
+
+// warnLines renders tyre/bulb/service warnings; empty when all clear.
+func warnLines(cv map[string]volvo.CVMap) []string {
+	var warn []string
+	for k, f := range cv["tyres"] {
+		if !nominal(string(f.Value)) {
+			warn = append(warn, fmt.Sprintf("Tyre %s: %s", humanKey(k), humanVal(string(f.Value))))
+		}
+	}
+	bulbs := 0
+	for _, f := range cv["warnings"] {
+		if !nominal(string(f.Value)) {
+			bulbs++
+		}
+	}
+	if bulbs > 0 {
+		warn = append(warn, fmt.Sprintf("%d bulb warning(s)", bulbs))
+	}
+	for k, f := range cv["diagnostics"] {
+		if strings.HasSuffix(k, "Warning") && !nominal(string(f.Value)) {
+			warn = append(warn, fmt.Sprintf("%s: %s", humanKey(k), humanVal(string(f.Value))))
+		}
+	}
+	sort.Strings(warn)
+	return warn
+}
+
+// carLines renders Connected Vehicle state for the tooltip — anomalies
+// only, so a locked, closed, warning-free car contributes exactly one
+// reassuring line.
+func carLines(cv map[string]volvo.CVMap) []string {
+	var lines []string
+	open := append(openParts(cv["doors"], "centralLock"), openParts(cv["windows"], "")...)
+	sort.Strings(open)
+	lock := strings.TrimSpace(string(cv["doors"]["centralLock"].Value))
+	switch {
+	case len(open) > 0:
+		lines = append(lines, "Open: "+strings.Join(open, ", "))
+		if lock == "UNLOCKED" {
+			lines = append(lines, "Unlocked")
+		}
+	case lock == "UNLOCKED":
+		lines = append(lines, "Unlocked")
+	case lock == "LOCKED":
+		lines = append(lines, "Locked, all closed")
+	}
+	if strings.TrimSpace(string(cv["engine-status"]["engineStatus"].Value)) == "RUNNING" {
+		lines = append(lines, "Ignition on")
+	}
+	return append(lines, warnLines(cv)...)
+}
+
+// statusCarLines is carLines' verbose sibling for `status` — it states
+// the nominal cases too and adds odometer/service/trip numbers.
+func statusCarLines(cv map[string]volvo.CVMap) []string {
+	var lines []string
+	if f, ok := cv["odometer"]["odometer"]; ok {
+		lines = append(lines, fmt.Sprintf("Odometer: %s %s", f.Value, f.Unit))
+	}
+	if f, ok := cv["engine-status"]["engineStatus"]; ok {
+		lines = append(lines, "Ignition: "+humanVal(string(f.Value)))
+	}
+	if f, ok := cv["doors"]["centralLock"]; ok {
+		lines = append(lines, "Lock: "+humanVal(string(f.Value)))
+	}
+	for _, part := range []struct{ leaf, label, skip string }{
+		{"doors", "Doors", "centralLock"},
+		{"windows", "Windows", ""},
+	} {
+		if len(cv[part.leaf]) == 0 {
+			continue
+		}
+		if open := openParts(cv[part.leaf], part.skip); len(open) > 0 {
+			lines = append(lines, part.label+" open: "+strings.Join(open, ", "))
+		} else {
+			lines = append(lines, part.label+": all closed")
+		}
+	}
+	if warn := warnLines(cv); len(warn) > 0 {
+		lines = append(lines, warn...)
+	} else if len(cv["tyres"]) > 0 || len(cv["warnings"]) > 0 || len(cv["diagnostics"]) > 0 {
+		lines = append(lines, "Warnings: none")
+	}
+	if f, ok := cv["diagnostics"]["distanceToService"]; ok {
+		lines = append(lines, fmt.Sprintf("Service in: %s %s", f.Value, f.Unit))
+	}
+	if f, ok := cv["statistics"]["distanceToEmptyBattery"]; ok {
+		lines = append(lines, fmt.Sprintf("Distance to empty: %s %s", f.Value, f.Unit))
+	}
+	if f, ok := cv["statistics"]["averageEnergyConsumption"]; ok {
+		lines = append(lines, fmt.Sprintf("Avg consumption: %s %s", f.Value, f.Unit))
+	}
+	return lines
+}
+
+// nominal reports whether a Connected Vehicle enum value carries no
+// news worth surfacing.
+func nominal(v string) bool {
+	switch strings.TrimSpace(v) {
+	case "", "NO_WARNING", "UNSPECIFIED":
+		return true
+	}
+	return false
+}
+
+func openish(v string) bool {
+	s := strings.TrimSpace(v)
+	return s == "OPEN" || s == "AJAR"
+}
+
+// humanKey renders a camelCase API field name as spaced lowercase
+// words ("frontLeftDoor" → "front left door").
+func humanKey(k string) string {
+	var b []byte
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		if c >= 'A' && c <= 'Z' {
+			if i > 0 {
+				b = append(b, ' ')
+			}
+			c += 'a' - 'A'
+		}
+		b = append(b, c)
+	}
+	return string(b)
+}
+
+// humanVal renders an ENUM_VALUE as lowercase words.
+func humanVal(v string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(v), "_", " "))
 }
 
 // locationLines renders the GPS fix for the tooltip — a sibling of

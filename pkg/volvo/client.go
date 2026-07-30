@@ -152,6 +152,35 @@ func (c *Client) Location(vin string) (*Location, error) {
 	}, nil
 }
 
+// CVField is the Connected Vehicle API v2 per-datum envelope. Unlike
+// Energy v2's Field there is no status member — unsupported data is
+// either absent or carries an UNSPECIFIED value.
+type CVField struct {
+	Value     FieldValue `json:"value"`
+	Unit      string     `json:"unit"`
+	Timestamp time.Time  `json:"timestamp"`
+}
+
+// CVMap is one Connected Vehicle v2 resource: field name → datum.
+type CVMap map[string]CVField
+
+// Connected fetches one Connected Vehicle v2 resource leaf. Known
+// leaves and their scopes: "doors" (conve:doors_status +
+// conve:lock_status), "windows" (conve:windows_status),
+// "engine-status" (conve:engine_status), "odometer"
+// (conve:odometer_status), "tyres" (conve:tyre_status), "warnings"
+// (conve:warnings), "diagnostics" (conve:diagnostics_workshop),
+// "statistics" (conve:trip_statistics).
+func (c *Client) Connected(vin, leaf string) (CVMap, error) {
+	var out struct {
+		Data CVMap `json:"data"`
+	}
+	if err := c.get("/connected-vehicle/v2/vehicles/"+url.PathEscape(vin)+"/"+leaf, &out); err != nil {
+		return nil, err
+	}
+	return out.Data, nil
+}
+
 // Vehicles lists the VINs registered to the authenticated Volvo ID.
 func (c *Client) Vehicles() ([]string, error) {
 	var out struct {
