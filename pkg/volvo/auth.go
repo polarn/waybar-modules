@@ -20,8 +20,10 @@ import (
 // flow and returns fresh tokens. Volvo ID logins include an email 2FA
 // step, so this can never be headless: we open the system browser and
 // catch the redirect on a localhost callback server. The redirect URI
-// (http://localhost:<port>/callback) must be registered verbatim on the
-// developer-portal application.
+// must be registered verbatim on the developer-portal application; the
+// portal bans localhost URIs, so cfg.RedirectURI normally points at a
+// public forwarding page (docs/volvo-callback) that bounces the browser
+// on to the localhost listener.
 func Authenticate(cfg *Config, openBrowser bool) (*Tokens, error) {
 	verifier, err := generateCodeVerifier()
 	if err != nil {
@@ -36,6 +38,9 @@ func Authenticate(cfg *Config, openBrowser bool) (*Tokens, error) {
 		port = DefaultRedirectPort
 	}
 	redirect := fmt.Sprintf("http://localhost:%d/callback", port)
+	if cfg.RedirectURI != "" {
+		redirect = cfg.RedirectURI
+	}
 
 	// Bind before opening the browser so a taken port fails fast.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))

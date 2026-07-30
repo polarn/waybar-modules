@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>volvo-ctl OAuth callback</title>
+<!--
+  Volvo's developer portal refuses localhost redirect URIs, so this page
+  is registered instead. It immediately bounces the browser — query
+  string (code, state) intact — to the localhost server volvo-ctl runs
+  during `volvo-ctl auth`. The target is hardcoded: never forward
+  anywhere derived from the request, or this becomes an open redirect.
+-->
+<p>Forwarding the login to <a id="target" href="http://localhost:20999/callback">volvo-ctl on this machine</a>&hellip;</p>
+<p>If nothing happens, volvo-ctl isn't listening — run <code>volvo-ctl auth</code> and log in again.</p>
+<script>
+  var dest = "http://localhost:20999/callback" + location.search;
+  document.getElementById("target").href = dest;
+  location.replace(dest);
+</script>

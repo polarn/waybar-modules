@@ -391,6 +391,10 @@ Global flags (all subcommands):
   --vin <vin>      VIN override (default: config.json, else sole vehicle)
 
 Config file ($HOME/.config/volvo/config.json, chmod 600):
-  {"client_id": "...", "client_secret": "...", "vcc_api_key": "...", "vin": "..."}`)
+  {"client_id": "...", "client_secret": "...", "vcc_api_key": "...",
+   "redirect_uri": "https://<your-pages>/volvo-callback/", "vin": "..."}
+  redirect_uri is the public forwarding page registered on the portal app
+  (the portal bans localhost); omit it only for apps registered with the
+  legacy http://localhost:20999/callback.`)
 	os.Exit(2)
 }

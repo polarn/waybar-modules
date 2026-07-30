@@ -92,11 +92,14 @@ Add this to your Waybar configuration file, usually `~/.config/waybar/config`:
 ## volvo-ctl
 A CLI for Volvo's cloud API (Energy API v2) that reports an EV's battery/charging state. `volvo-ctl waybar` emits one JSON line for a Waybar custom module (run it with `"interval"`, not as a daemon).
 
-Needs an application from [developer.volvocars.com](https://developer.volvocars.com) published with the `openid conve:vehicle_relation energy:state:read energy:capability:read` scopes and redirect URI `http://localhost:20999/callback`. Put the credentials in `~/.config/volvo/config.json`:
+Needs an application from [developer.volvocars.com](https://developer.volvocars.com) published with the `openid conve:vehicle_relation energy:state:read energy:capability:read` scopes. The portal refuses localhost redirect URIs, so register the forwarding page served from this repo's GitHub Pages instead: `https://polarn.github.io/waybar-modules/volvo-callback/` (source in `docs/volvo-callback/` — it forwards the OAuth callback, query string intact, to `http://localhost:20999/callback` where `volvo-ctl auth` is listening; fork the repo or host a copy anywhere if you don't want to trust mine). Put the credentials in `~/.config/volvo/config.json`:
 
 ```json
-    {"client_id": "...", "client_secret": "...", "vcc_api_key": "...", "vin": "..."}
+    {"client_id": "...", "client_secret": "...", "vcc_api_key": "...",
+     "redirect_uri": "https://polarn.github.io/waybar-modules/volvo-callback/", "vin": "..."}
 ```
+
+`redirect_uri` must match the portal registration character-for-character. Omit it only for apps registered back when localhost redirect URIs were allowed.
 
 Then run `volvo-ctl auth` (opens a browser for the Volvo ID login; tokens are kept fresh automatically in `~/.config/volvo/tokens.json`). Personal Volvo apps have a limited consent grant, so expect to re-run `auth` periodically — the waybar output switches to a `reauth` class when that happens. See `volvo-ctl help` for the other subcommands (`vehicles`, `status`).
 

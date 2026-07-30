@@ -41,6 +41,12 @@ type Config struct {
 	VccAPIKey    string `json:"vcc_api_key"`
 	VIN          string `json:"vin,omitempty"`           // pin to skip the vehicle-list call
 	RedirectPort int    `json:"redirect_port,omitempty"` // 0 → DefaultRedirectPort
+	// RedirectURI is the redirect URI registered on the portal app. The
+	// portal no longer accepts localhost URIs, so this is a public page
+	// that forwards the callback query string to the localhost listener
+	// (docs/volvo-callback in this repo, served via GitHub Pages). Empty
+	// → the legacy http://localhost:<port>/callback.
+	RedirectURI string `json:"redirect_uri,omitempty"`
 }
 
 // DefaultDir returns ~/.config/volvo.
