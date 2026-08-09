@@ -20,8 +20,15 @@ type Report struct {
 		TotalLayerNum   *Num   `json:"total_layer_num"`
 		NozzleTemper    *Num   `json:"nozzle_temper"`
 		BedTemper       *Num   `json:"bed_temper"`
-		ChamberTemper   *Num   `json:"chamber_temper"`
-		AMS             struct {
+		ChamberTemper   *Num   `json:"chamber_temper"` // X1-era only — use Report.ChamberTemp
+		Device          struct {
+			CTC struct { // chamber temperature control
+				Info struct {
+					Temp *Num `json:"temp"`
+				} `json:"info"`
+			} `json:"ctc"`
+		} `json:"device"`
+		AMS struct {
 			AMS []struct {
 				Humidity *Num `json:"humidity"` // coarse 1-5 index (all AMS models)
 				// HumidityRaw is actual %RH — AMS 2 Pro and newer only.
@@ -37,6 +44,25 @@ type Report struct {
 			} `json:"ams"`
 		} `json:"ams"`
 	} `json:"print"`
+}
+
+// ChamberTemp returns the chamber temperature in °C, and false when the
+// printer reports none. P2S-generation firmware dropped the flat
+// chamber_temper field and reports the chamber under device.ctc
+// ("chamber temperature control") instead; X1-era firmware has only the
+// flat field. Preferring ctc means a firmware that re-adds a stubbed
+// chamber_temper: 0 can't silently win.
+func (r *Report) ChamberTemp() (int, bool) {
+	if t := r.Print.Device.CTC.Info.Temp; t != nil {
+		// device.* packs temps as (target << 16) | current, the way the bed
+		// and extruder siblings do. The chamber has no target today (high
+		// half 0); mask so a future one can't render as a 7-digit °C.
+		return t.Int() & 0xffff, true
+	}
+	if t := r.Print.ChamberTemper; t != nil {
+		return t.Int(), true
+	}
+	return 0, false
 }
 
 // Num tolerates a JSON number or a numeric string. Junk parses to 0

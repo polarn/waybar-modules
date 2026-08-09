@@ -356,8 +356,12 @@ func summaryLines(rep *bambu.Report) []string {
 			p.McRemainingTime.Int()),
 		fmt.Sprintf("nozzle:    %d °C", p.NozzleTemper.Int()),
 		fmt.Sprintf("bed:       %d °C", p.BedTemper.Int()),
-		fmt.Sprintf("chamber:   %d °C", p.ChamberTemper.Int()),
 	)
+	// Printers/firmwares that report no chamber sensor get no line, rather
+	// than a plausible-looking 0 °C.
+	if chamber, ok := rep.ChamberTemp(); ok {
+		lines = append(lines, fmt.Sprintf("chamber:   %d °C", chamber))
+	}
 	if len(p.AMS.AMS) > 0 {
 		unit := p.AMS.AMS[0]
 		// Prefer real %RH (AMS 2 Pro+); older units only have the 1-5 index.
