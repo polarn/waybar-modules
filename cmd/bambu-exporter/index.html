@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bambu P2S</title>
+<style>
+  /* Heat-zone colours are shared with the Grafana dashboard on purpose:
+     chamber blue, bed orange, nozzle red. Same hue means the same thing
+     on both surfaces. */
+  :root {
+    --ground:  #f1f4f6;
+    --surface: #ffffff;
+    --sunken:  #e8edf1;
+    --ink:     #11171c;
+    --ink-soft:#3a4650;
+    --muted:   #5f6d78;
+    --rule:    #d9e0e6;
+    --nozzle:  #c0392b;
+    --bed:     #b8761a;
+    --chamber: #2079a3;
+    --ok:      #2e7d47;
+    --warn:    #b8761a;
+    --bad:     #c0392b;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:  #0e1418;
+      --surface: #151c22;
+      --sunken:  #1b242b;
+      --ink:     #e5ebf0;
+      --ink-soft:#c3ced7;
+      --muted:   #93a2ad;
+      --rule:    #263039;
+      --nozzle:  #e4694e;
+      --bed:     #dca149;
+      --chamber: #5fbad2;
+      --ok:      #5cbf7a;
+      --warn:    #dca149;
+      --bad:     #e4694e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 16px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 1.5rem 1.1rem 3rem; }
+
+  header { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+  h1 { font-size: 1.5rem; margin: 0; letter-spacing: -.02em; font-weight: 650; }
+  .pill {
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: .2rem .55rem; border-radius: 999px; border: 1px solid var(--rule);
+    background: var(--sunken); color: var(--ink-soft); white-space: nowrap;
+  }
+  .pill.running { border-color: var(--ok); color: var(--ok); }
+  .pill.paused, .pill.warn { border-color: var(--warn); color: var(--warn); }
+  .pill.failed, .pill.off  { border-color: var(--bad); color: var(--bad); }
+  .grow { flex: 1; }
+  #age { font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+
+  .grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr); gap: 1rem; }
+  @media (max-width: 760px) { .grid { grid-template-columns: minmax(0,1fr); } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: .75rem; min-width: 0;
+  }
+  .card h2 {
+    font-family: var(--mono); font-size: .68rem; letter-spacing: .13em; text-transform: uppercase;
+    color: var(--muted); margin: 0; font-weight: 500;
+  }
+
+  /* plate preview */
+  .plate { align-items: center; gap: .6rem; }
+  .plate img {
+    width: 100%; max-width: 340px; aspect-ratio: 1; object-fit: contain;
+    background: var(--sunken); border-radius: 8px;
+  }
+  .job { font-weight: 600; text-align: center; overflow-wrap: anywhere; }
+  .jobmeta { font-family: var(--mono); font-size: .78rem; color: var(--muted); text-align: center; }
+  .nocover { color: var(--muted); font-size: .85rem; text-align: center; padding: 2rem 0; }
+
+  /* progress */
+  .bar { height: 10px; background: var(--sunken); border-radius: 999px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--ok); width: 0; transition: width .4s ease; }
+  .prog-top { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+  .pct { font-family: var(--mono); font-size: 1.9rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .eta { font-family: var(--mono); color: var(--muted); font-size: .85rem; }
+
+  /* temperature tiles */
+  .temps { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+  .temp { background: var(--sunken); border-radius: 8px; padding: .6rem .7rem; min-width: 0; }
+  .temp .lbl {
+    font-family: var(--mono); font-size: .65rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); display: flex; align-items: center; gap: .35rem;
+  }
+  .temp .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .temp .val { font-family: var(--mono); font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+  .temp .tgt { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+
+  /* AMS */
+  .trays { display: flex; flex-direction: column; gap: .45rem; }
+  .tray { display: grid; grid-template-columns: 18px 1fr auto; gap: .6rem; align-items: center; font-size: .88rem; }
+  .swatch { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--rule); }
+  .tray .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tray .rem { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
+  .amsmeta { font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+
+  table.kv { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  table.kv td { padding: .18rem 0; }
+  table.kv td:last-child { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  table.kv td:first-child { color: var(--muted); }
+
+  footer { margin-top: 1.5rem; font-size: .8rem; color: var(--muted); display: flex; gap: 1rem; flex-wrap: wrap; }
+  footer a { color: inherit; }
+  .err { background: var(--surface); border: 1px solid var(--bad); border-radius: 10px; padding: 1rem 1.1rem; color: var(--bad); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="printer">Bambu</h1>
+    <span class="pill" id="state">connecting</span>
+    <span class="grow"></span>
+    <span id="age"></span>
+  </header>
+
+  <div class="err" id="error" hidden></div>
+
+  <div class="grid">
+    <section class="card plate">
+      <h2>Plate</h2>
+      <img id="cover" alt="Render of the sliced plate" hidden>
+      <div class="nocover" id="nocover">No plate preview yet</div>
+      <div class="job" id="job"></div>
+      <div class="jobmeta" id="jobmeta"></div>
+    </section>
+
+    <div style="display:flex;flex-direction:column;gap:1rem;min-width:0">
+      <section class="card">
+        <h2>Progress</h2>
+        <div class="prog-top">
+          <span class="pct" id="pct">–</span>
+          <span class="eta" id="eta"></span>
+        </div>
+        <div class="bar"><div id="barfill"></div></div>
+        <table class="kv">
+          <tr><td>Layer</td><td id="layer">–</td></tr>
+          <tr id="stagerow" hidden><td>Stage</td><td id="stage"></td></tr>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Temperatures</h2>
+        <div class="temps">
+          <div class="temp">
+            <div class="lbl"><span class="dot" style="background:var(--nozzle)"></span>Nozzle</div>
+            <div class="val" id="t-nozzle">–</div>
+            <div class="tgt" id="t-nozzle-tgt"></div>
+          </div>
+          <div class="temp">
+            <div class="lbl"><span class="dot" style="background:var(--bed)"></span>Bed</div>
+            <div class="val" id="t-bed">–</div>
+            <div class="tgt" id="t-bed-tgt"></div>
+          </div>
+          <div class="temp">
+            <div class="lbl"><span class="dot" style="background:var(--chamber)"></span>Chamber</div>
+            <div class="val" id="t-chamber">–</div>
+            <div class="tgt" id="t-chamber-tgt"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>AMS</h2>
+        <div class="amsmeta" id="amsmeta"></div>
+        <div class="trays" id="trays"></div>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    <span id="foot-note">Live via one held-open cloud MQTT session.</span>
+    <a href="/state">/state</a>
+    <a href="/healthz">/healthz</a>
+    <a href="https://grafana.polarn.net/d/bambu">History in Grafana</a>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+const STATE_CLASS = {
+  RUNNING: "running", PREPARE: "running", SLICING: "running",
+  PAUSE: "paused", FAILED: "failed", FINISH: "", IDLE: "",
+};
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + "h " + String(m).padStart(2, "0") + "m";
+  if (m > 0) return m + "m";
+  return sec + "s";
+}
+
+// The printer packs device.* temps as (target << 16) | current; the chamber
+// has no target today, so the low 16 bits are the reading either way.
+function chamberTemp(p) {
+  const v = p?.device?.ctc?.info?.temp;
+  if (v === undefined || v === null) return null;
+  return Number(v) & 0xffff;
+}
+
+function num(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function setTemp(id, value, target) {
+  $(id).textContent = value === null ? "–" : Math.round(value) + " °C";
+  const t = $(id + "-tgt");
+  if (t) t.textContent = target ? "target " + Math.round(target) + " °C" : "";
+}
+
+function render(env) {
+  const p = env.report?.print ?? {};
+  $("printer").textContent = "Bambu " + (env.printer || "");
+
+  const stale = env.age_seconds > 300;
+  let state = (p.gcode_state || "IDLE").toUpperCase();
+  if (stale) state = "OFFLINE";
+  $("state").textContent = state.toLowerCase();
+  $("state").className = "pill " + (stale ? "off" : (STATE_CLASS[state] ?? ""));
+  $("age").textContent = "updated " + fmtDuration(env.age_seconds) + " ago";
+
+  // progress
+  const pct = num(p.mc_percent) ?? 0;
+  $("pct").textContent = pct + "%";
+  $("barfill").style.width = pct + "%";
+  const left = num(p.mc_remaining_time);
+  $("eta").textContent = left ? fmtDuration(left * 60) + " left" : "";
+  const cur = num(p.layer_num), tot = num(p.total_layer_num);
+  $("layer").textContent = tot ? cur + " / " + tot : "–";
+  // The exporter resolves stg_cur to the printer's own wording and omits
+  // it when idle, so there is never a bare stage code on screen.
+  $("stage").textContent = env.stage || "";
+  $("stagerow").hidden = !env.stage;
+
+  // temperatures
+  setTemp("t-nozzle", num(p.nozzle_temper), num(p.nozzle_target_temper));
+  setTemp("t-bed", num(p.bed_temper), num(p.bed_target_temper));
+  setTemp("t-chamber", chamberTemp(p), null);
+
+  // AMS
+  const unit = p.ams?.ams?.[0];
+  if (unit) {
+    const hum = num(unit.humidity_raw), tmp = num(unit.temp);
+    const bits = [];
+    if (hum !== null) bits.push("humidity " + hum + "%" + (hum > 40 ? " — consider drying" : ""));
+    if (tmp !== null) bits.push(Math.round(tmp) + " °C");
+    $("amsmeta").textContent = bits.join(" · ");
+    $("trays").replaceChildren(...(unit.tray || []).map((t, i) => {
+      const row = document.createElement("div");
+      row.className = "tray";
+      const sw = document.createElement("span");
+      sw.className = "swatch";
+      // tray_color is RRGGBBAA; drop the alpha.
+      sw.style.background = t.tray_color ? "#" + String(t.tray_color).slice(0, 6) : "transparent";
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = (t.tray_sub_brands || t.tray_type || "empty") + " ";
+      const rem = document.createElement("span");
+      rem.className = "rem";
+      const r = num(t.remain);
+      rem.textContent = r !== null && r >= 0 ? r + "%" : "";
+      row.append(sw, name, rem);
+      return row;
+    }));
+  } else {
+    $("amsmeta").textContent = "No AMS reported";
+    $("trays").replaceChildren();
+  }
+
+  // plate preview
+  const task = env.task;
+  $("job").textContent = task?.title || p.subtask_name || "";
+  if (task) {
+    const meta = [];
+    if (task.weight_grams) meta.push(task.weight_grams.toFixed(1) + " g");
+    if (task.duration_seconds) meta.push(fmtDuration(task.duration_seconds));
+    $("jobmeta").textContent = meta.join(" · ");
+  } else {
+    $("jobmeta").textContent = "";
+  }
+  if (task?.has_cover) {
+    // Cache-bust per job so a new print swaps the render.
+    $("cover").src = "/cover?v=" + encodeURIComponent(task.cover_id || "");
+    $("cover").hidden = false;
+    $("nocover").hidden = true;
+  } else {
+    $("cover").hidden = true;
+    $("nocover").hidden = false;
+  }
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/state", { cache: "no-store" });
+    if (!r.ok) throw new Error("exporter returned " + r.status +
+      (r.status === 503 ? " — no report from the printer yet" : ""));
+    render(await r.json());
+    $("error").hidden = true;
+  } catch (e) {
+    $("error").textContent = String(e.message || e);
+    $("error").hidden = false;
+    $("state").textContent = "unreachable";
+    $("state").className = "pill off";
+  }
+}
+
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

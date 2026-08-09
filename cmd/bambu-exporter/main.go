@@ -18,6 +18,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,7 +86,31 @@ func main() {
 		fmt.Fprint(w, collect(printer, &st, sess, authOK.Load()))
 	})
 
+	// The plate render from the cloud tasks API. Not the camera: a live
+	// stream needs LAN-only mode + LAN Only Liveview, which would disable
+	// Bambu Cloud entirely (the report shows ipcam.rtsp_url "disable" and
+	// ipcam.tutk_server "enable" — cloud video rides ThroughTek P2P).
+	tasks := newTaskCache(sess.AccessToken, serial)
+	go tasks.run(ctx.Done(), func(f string, a ...any) {
+		log.Printf("bambu-exporter: "+f, a...)
+	})
+
 	appMux := http.NewServeMux()
+	appMux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(indexHTML)
+	})
+	appMux.HandleFunc("/cover", func(w http.ResponseWriter, r *http.Request) {
+		img, ctype, ok := tasks.coverBytes()
+		if !ok {
+			http.Error(w, "no plate preview available", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", ctype)
+		// Immutable per job: the URL carries a per-cover cache buster.
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = w.Write(img)
+	})
 	appMux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
 		raw, ok := st.Raw()
 		if !ok {
@@ -96,11 +123,28 @@ func main() {
 		// decodes it with its own Report struct, so a client newer than the
 		// exporter still finds the fields it knows about. The serial stays
 		// out — it is credential-adjacent and this endpoint is on the LAN.
-		_ = json.NewEncoder(w).Encode(struct {
-			Printer    string          `json:"printer"`
-			AgeSeconds float64         `json:"age_seconds"`
-			Report     json.RawMessage `json:"report"`
-		}{printer, age.Seconds(), raw})
+		env := stateEnvelope{Printer: printer, AgeSeconds: age.Seconds(), Report: raw}
+		// The printer's own display wording for stg_cur, resolved here so
+		// the page never shows a raw stage code (it is -1 when idle).
+		if rep, ok := st.Report(); ok {
+			if s := rep.Print.StgCur; s != nil && !bambu.StageIdle(s.Int()) {
+				env.Stage = bambu.StageName(s.Int())
+			}
+		}
+		if t, ok := tasks.get(); ok {
+			_, _, coverOK := tasks.coverBytes()
+			env.Task = &taskInfo{
+				Title:           t.Title,
+				WeightGrams:     t.Weight,
+				DurationSeconds: t.CostTime,
+				StartedAt:       t.StartTime,
+				HasCover:        coverOK,
+				// Changes when the job does, so the page's <img> reloads
+				// instead of showing the previous print's render.
+				CoverID: coverID(t.Cover),
+			}
+		}
+		_ = json.NewEncoder(w).Encode(env)
 	})
 	appMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		// Deliberately not tied to report freshness: a powered-off printer
@@ -129,6 +173,47 @@ func main() {
 	for _, s := range servers {
 		_ = s.Shutdown(shutdown)
 	}
+}
+
+// indexHTML is the status page. Embedded because the runtime image is
+// `scratch` — there is no filesystem to serve it from.
+//
+//go:embed index.html
+var indexHTML []byte
+
+// stateEnvelope is what /state returns. The full merged report rides along
+// as raw JSON so clients decode it with their own struct and a client
+// newer than the exporter still finds the fields it knows. The printer
+// serial is deliberately absent: it is credential-adjacent and this
+// endpoint is reachable from the LAN.
+type stateEnvelope struct {
+	Printer    string          `json:"printer"`
+	AgeSeconds float64         `json:"age_seconds"`
+	Stage      string          `json:"stage,omitempty"`
+	Task       *taskInfo       `json:"task,omitempty"`
+	Report     json.RawMessage `json:"report"`
+}
+
+// taskInfo is the sliced-job metadata behind the plate preview. The cover
+// URL itself is not exposed — the page loads /cover instead, so it has no
+// third-party requests.
+type taskInfo struct {
+	Title           string  `json:"title"`
+	WeightGrams     float64 `json:"weight_grams,omitempty"`
+	DurationSeconds int     `json:"duration_seconds,omitempty"`
+	StartedAt       string  `json:"started_at,omitempty"`
+	HasCover        bool    `json:"has_cover"`
+	CoverID         string  `json:"cover_id,omitempty"`
+}
+
+// coverID is a short stable id for a cover URL, used only to bust the
+// browser cache when the job changes.
+func coverID(coverURL string) string {
+	if coverURL == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(coverURL))
+	return hex.EncodeToString(sum[:6])
 }
 
 func newServer(addr string, h http.Handler) *http.Server {

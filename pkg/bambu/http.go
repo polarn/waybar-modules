@@ -3,9 +3,11 @@ package bambu
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -16,13 +18,13 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 // Bambu's API applies risk control to unknown clients; these headers
 // mimic OrcaSlicer, same as ha-bambulab does.
 var apiHeaders = map[string]string{
-	"User-Agent":            "bambu_network_agent/01.09.05.01",
-	"X-BBL-Client-Name":     "OrcaSlicer",
-	"X-BBL-Client-Type":     "slicer",
-	"X-BBL-Client-Version":  "01.09.05.51",
-	"X-BBL-Language":        "en-US",
-	"X-BBL-OS-Type":         "linux",
-	"X-BBL-Agent-Version":   "01.09.05.01",
+	"User-Agent":           "bambu_network_agent/01.09.05.01",
+	"X-BBL-Client-Name":    "OrcaSlicer",
+	"X-BBL-Client-Type":    "slicer",
+	"X-BBL-Client-Version": "01.09.05.51",
+	"X-BBL-Language":       "en-US",
+	"X-BBL-OS-Type":        "linux",
+	"X-BBL-Agent-Version":  "01.09.05.01",
 }
 
 // LoginResult is the /user/login response. AccessToken is set on direct
@@ -171,6 +173,67 @@ func UsernameFromAPI(token string) (string, error) {
 		return "", fmt.Errorf("my/preference: no uid in response")
 	}
 	return "u_" + body.UID.String(), nil
+}
+
+// getAuthed does a bearer-authenticated GET and decodes the JSON body.
+func getAuthed(token, path string, v any) error {
+	req, err := http.NewRequest("GET", apiBase+path, nil)
+	if err != nil {
+		return err
+	}
+	for k, val := range apiHeaders {
+		req.Header.Set(k, val)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return ErrAuth
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, snippet)
+	}
+	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// ErrNoTask means the account has no print history for this printer.
+var ErrNoTask = errors.New("no print tasks for this printer")
+
+// Task is one job from the account's print history.
+//
+// Cover is a render of the sliced plate, served unauthenticated from
+// Bambu's CDN. It is the closest thing to a camera view available while
+// the printer stays in Cloud mode: the live stream needs LAN-only mode +
+// LAN Only Liveview (the report shows ipcam.rtsp_url "disable" and
+// ipcam.tutk_server "enable" — cloud video goes over ThroughTek P2P).
+type Task struct {
+	Title      string  `json:"title"`
+	Cover      string  `json:"cover"`
+	Status     int     `json:"status"`
+	Weight     float64 `json:"weight"`   // grams of filament
+	CostTime   int     `json:"costTime"` // seconds the job took
+	DeviceName string  `json:"deviceName"`
+	StartTime  string  `json:"startTime"`
+}
+
+// LatestTask returns the most recent print job for a printer, for the
+// plate preview on the status page. ErrNoTask if the history is empty.
+func LatestTask(token, serial string) (*Task, error) {
+	var body struct {
+		Hits []Task `json:"hits"`
+	}
+	path := "/v1/user-service/my/tasks?deviceId=" + url.QueryEscape(serial) + "&limit=1"
+	if err := getAuthed(token, path, &body); err != nil {
+		return nil, err
+	}
+	if len(body.Hits) == 0 {
+		return nil, ErrNoTask
+	}
+	return &body.Hits[0], nil
 }
 
 // Device is one printer bound to the account.
