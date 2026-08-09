@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"os"
 	"strings"
 	"time"
@@ -337,7 +338,10 @@ func summaryLines(rep *bambu.Report) []string {
 	if state == "" {
 		state = "IDLE"
 	}
-	job := p.SubtaskName
+	// MakerWorld model titles arrive HTML-escaped ("Snake &apos;Long&apos;"),
+	// so decode once here: `status` prints the entity literally otherwise,
+	// and the tooltip's own Pango escaping would turn it into &amp;apos;.
+	job := html.UnescapeString(p.SubtaskName)
 	if job == "" {
 		job = "-"
 	}
