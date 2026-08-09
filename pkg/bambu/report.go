@@ -10,18 +10,36 @@ import (
 // fields, hence Num everywhere.
 type Report struct {
 	Print struct {
-		GcodeState      string `json:"gcode_state"`
-		SubtaskName     string `json:"subtask_name"`
-		StgCur          *Num   `json:"stg_cur"` // current stage — see StageName
+		GcodeState  string `json:"gcode_state"`
+		SubtaskName string `json:"subtask_name"`
+		StgCur      *Num   `json:"stg_cur"` // current stage — see StageName
 
-		McPercent       *Num   `json:"mc_percent"`
-		McRemainingTime *Num   `json:"mc_remaining_time"`
-		LayerNum        *Num   `json:"layer_num"`
-		TotalLayerNum   *Num   `json:"total_layer_num"`
-		NozzleTemper    *Num   `json:"nozzle_temper"`
-		BedTemper       *Num   `json:"bed_temper"`
-		ChamberTemper   *Num   `json:"chamber_temper"` // X1-era only — use Report.ChamberTemp
-		Device          struct {
+		McPercent       *Num `json:"mc_percent"`
+		McRemainingTime *Num `json:"mc_remaining_time"`
+		LayerNum        *Num `json:"layer_num"`
+		TotalLayerNum   *Num `json:"total_layer_num"`
+		NozzleTemper    *Num `json:"nozzle_temper"`
+		BedTemper       *Num `json:"bed_temper"`
+		ChamberTemper   *Num `json:"chamber_temper"` // X1-era only — use Report.ChamberTemp
+
+		NozzleTargetTemper *Num `json:"nozzle_target_temper"`
+		BedTargetTemper    *Num `json:"bed_target_temper"`
+		NozzleDiameter     *Num `json:"nozzle_diameter"`
+		PrintError         *Num `json:"print_error"`
+		SpdLvl             *Num `json:"spd_lvl"` // 1=silent 2=standard 3=sport 4=ludicrous
+		SpdMag             *Num `json:"spd_mag"` // speed as a percentage
+
+		// Fan speeds are 0-15 gear values, not percentages.
+		CoolingFanSpeed   *Num `json:"cooling_fan_speed"`
+		BigFan1Speed      *Num `json:"big_fan1_speed"`
+		BigFan2Speed      *Num `json:"big_fan2_speed"`
+		HeatbreakFanSpeed *Num `json:"heatbreak_fan_speed"`
+
+		// WifiSignal carries its unit ("-56dBm"), so Num can't parse it —
+		// see WifiSignalDBm.
+		WifiSignal string `json:"wifi_signal"`
+
+		Device struct {
 			CTC struct { // chamber temperature control
 				Info struct {
 					Temp *Num `json:"temp"`
@@ -63,6 +81,29 @@ func (r *Report) ChamberTemp() (int, bool) {
 		return t.Int(), true
 	}
 	return 0, false
+}
+
+// WifiSignalDBm parses the signal strength, which the printer reports
+// with its unit attached ("-56dBm"). ok is false when the field is absent
+// or shaped differently on some other firmware.
+func (r *Report) WifiSignalDBm() (int, bool) {
+	s := strings.TrimSuffix(strings.TrimSpace(r.Print.WifiSignal), "dBm")
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// FanPercent converts a 0-15 fan gear value to a percentage.
+func FanPercent(n *Num) float64 {
+	if n == nil {
+		return 0
+	}
+	return float64(*n) / 15 * 100
 }
 
 // Num tolerates a JSON number or a numeric string. Junk parses to 0
