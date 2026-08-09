@@ -15,6 +15,12 @@ import (
 // Broker is Bambu's cloud MQTT endpoint for the global (non-China) region.
 const Broker = "us.mqtt.bambulab.com:8883"
 
+// pushallPayload asks the printer for a full state snapshot. The printer
+// rate-limits these to roughly one a minute, so callers must not send it
+// per poll — see Subscribe, which sends one per connection and then lives
+// off the partial pushes.
+var pushallPayload = []byte(`{"pushing":{"sequence_id":"0","command":"pushall"}}`)
+
 // Minimal MQTT 3.1.1 framing — just enough for this exchange (CONNECT,
 // one SUBSCRIBE, one QoS-0 PUBLISH, then read PUBLISHes until the report
 // arrives). Hand-rolled to keep the repo dependency-light; a full client
@@ -86,8 +92,7 @@ func FetchReport(s *Session, serial string, timeout time.Duration) (*Report, []b
 	defer conn.Close()
 
 	reportTopic := "device/" + serial + "/report"
-	pushall := []byte(`{"pushing":{"sequence_id":"0","command":"pushall"}}`)
-	if err := writePublish(conn, "device/"+serial+"/request", pushall); err != nil {
+	if err := writePublish(conn, "device/"+serial+"/request", pushallPayload); err != nil {
 		return nil, nil, err
 	}
 
@@ -216,7 +221,9 @@ func writeConnect(w io.Writer, clientID, user, pass string) error {
 	b = append(b, encodeString("MQTT")...)
 	b = append(b, 4)    // protocol level: 3.1.1
 	b = append(b, 0xC2) // flags: username + password + clean session
-	b = append(b, 0, 30) // keepalive 30 s (the whole exchange is shorter)
+	// Keepalive 30 s. The one-shot calls finish well inside it; Subscribe
+	// holds the connection open and pings under it (see writePing).
+	b = append(b, 0, 30)
 	b = append(b, encodeString(clientID)...)
 	b = append(b, encodeString(user)...)
 	b = append(b, encodeString(pass)...)
@@ -234,6 +241,12 @@ func writePublish(w io.Writer, topic string, payload []byte) error {
 	b := encodeString(topic)
 	b = append(b, payload...)
 	return writePacket(w, 0x30, b)
+}
+
+// writePing sends PINGREQ; the broker answers PINGRESP (packet type 13).
+// Only a long-lived subscription needs this.
+func writePing(w io.Writer) error {
+	return writePacket(w, 0xC0, nil)
 }
 
 func writeDisconnect(w io.Writer) {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Session is the cached login state. The file layout is shared with the
@@ -83,22 +84,48 @@ func (s *Session) Save(path string) error {
 // MQTTUsername derives the broker username from the access token: the
 // JWT payload carries a "username" claim of the form "u_<uid>".
 func (s *Session) MQTTUsername() (string, error) {
-	parts := strings.Split(s.AccessToken, ".")
-	if len(parts) < 2 {
-		return "", errors.New("access token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return "", fmt.Errorf("decode JWT payload: %w", err)
-	}
 	var claims struct {
 		Username string `json:"username"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("parse JWT payload: %w", err)
+	if err := s.claims(&claims); err != nil {
+		return "", err
 	}
 	if claims.Username == "" {
 		return "", errors.New("JWT payload has no username claim")
 	}
 	return claims.Username, nil
+}
+
+// TokenExpiry reports when the access token stops working, from the JWT
+// "exp" claim. Renewal is interactive (bambu-ctl login), so unattended
+// consumers should surface this rather than discover the lapse as a gap
+// in their data. Errors for opaque, non-JWT tokens — some login flows
+// mint those — in which case expiry simply isn't knowable up front.
+func (s *Session) TokenExpiry() (time.Time, error) {
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := s.claims(&claims); err != nil {
+		return time.Time{}, err
+	}
+	if claims.Exp == 0 {
+		return time.Time{}, errors.New("JWT payload has no exp claim")
+	}
+	return time.Unix(claims.Exp, 0), nil
+}
+
+// claims decodes the access token's JWT payload into v.
+func (s *Session) claims(v any) error {
+	parts := strings.Split(s.AccessToken, ".")
+	if len(parts) < 2 {
+		return errors.New("access token is not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return fmt.Errorf("decode JWT payload: %w", err)
+	}
+	if err := json.Unmarshal(payload, v); err != nil {
+		return fmt.Errorf("parse JWT payload: %w", err)
+	}
+	return nil
 }
