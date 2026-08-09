@@ -18,11 +18,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"html"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -270,7 +272,33 @@ func cmdWaybar(args []string) {
 	}
 }
 
+// staleAfter is how quiet the exporter's stream may go before the pill
+// calls the printer offline. Reports land every 1-2 s while it is on.
+const staleAfter = 5 * time.Minute
+
 func buildWaybar(g globalFlags) waybar.Waybar {
+	// Prefer bambu-exporter when it is configured: it holds a live
+	// subscription, so the pill gets fresher data and neither of us has to
+	// spend the printer's ~1/min pushall budget.
+	if base := os.Getenv("BAMBU_EXPORTER_URL"); base != "" {
+		name, rep, age, err := fetchFromExporter(base, 5*time.Second)
+		switch {
+		case err != nil:
+			// Fall through to the cloud. Worth a line on stderr (waybar
+			// forwards it to the journal) so a permanently broken exporter
+			// doesn't hide behind a pill that still looks fine.
+			fmt.Fprintf(os.Stderr, "exporter %s unavailable, using cloud: %v\n", base, err)
+		case age > staleAfter:
+			return waybar.Waybar{
+				Text:    iconPrinter,
+				Class:   "offline",
+				ToolTip: "<b>" + escapePango(name) + " offline</b>\nNo report for " + age.Round(time.Second).String(),
+			}
+		default:
+			return renderPill(name, rep)
+		}
+	}
+
 	sess, serial, err := loadSession(g)
 	if err != nil {
 		if errors.Is(err, bambu.ErrNoSession) {
@@ -303,13 +331,48 @@ func buildWaybar(g globalFlags) waybar.Waybar {
 	case err != nil:
 		return errPill(err)
 	}
+	return renderPill(sess.Name, rep)
+}
 
+// fetchFromExporter reads the merged report from bambu-exporter's /state.
+// The whole report comes back rather than a projection, so it decodes with
+// the same Report type as the cloud path and renders identically.
+func fetchFromExporter(base string, timeout time.Duration) (string, *bambu.Report, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/state", nil)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, 0, fmt.Errorf("exporter returned %s", resp.Status)
+	}
+
+	var env struct {
+		Printer    string       `json:"printer"`
+		AgeSeconds float64      `json:"age_seconds"`
+		Report     bambu.Report `json:"report"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return "", nil, 0, err
+	}
+	return env.Printer, &env.Report, time.Duration(env.AgeSeconds * float64(time.Second)), nil
+}
+
+// renderPill turns a report into the pill, shared by both sources.
+func renderPill(name string, rep *bambu.Report) waybar.Waybar {
 	p := rep.Print
 	state := strings.ToUpper(p.GcodeState)
 	if state == "" {
 		state = "IDLE"
 	}
-	tooltip := "<b>Bambu " + escapePango(sess.Name) + "</b>\n" +
+	tooltip := "<b>Bambu " + escapePango(name) + "</b>\n" +
 		escapePango(strings.Join(summaryLines(rep), "\n"))
 
 	var text, class string
