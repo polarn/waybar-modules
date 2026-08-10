@@ -32,13 +32,24 @@ func newTaskCache(token, serial string) *taskCache {
 	return &taskCache{token: token, serial: serial}
 }
 
-// run refreshes until ctx is done. Failures are logged and retried at the
-// normal interval: the plate preview is a nicety, and losing it must not
-// affect metrics or /state.
+// run refreshes until ctx is done. Transient failures are logged and
+// retried at the normal interval: the plate preview is a nicety, and
+// losing it must not affect metrics or /state.
+//
+// A rejected token is the exception — it stops the loop. Retrying cannot
+// help (the credential is fixed until the pod restarts) and every attempt
+// is another 401 against Bambu's risk control, which is exactly the shape
+// worth not generating a few hundred times a day. The stream stops on the
+// same condition, and reports it as bambulab_cloud_auth_ok.
 func (c *taskCache) run(done <-chan struct{}, logf func(string, ...any)) {
 	const every = 5 * time.Minute
 	for {
-		if err := c.refresh(); err != nil && !errors.Is(err, bambu.ErrNoTask) {
+		err := c.refresh()
+		switch {
+		case errors.Is(err, bambu.ErrAuth):
+			logf("plate preview: %v — not retrying until the token is replaced", err)
+			return
+		case err != nil && !errors.Is(err, bambu.ErrNoTask):
 			logf("plate preview unavailable: %v", err)
 		}
 		select {

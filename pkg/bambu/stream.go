@@ -23,7 +23,14 @@ func Subscribe(ctx context.Context, s *Session, serial string, st *State, logf f
 		logf = func(string, ...any) {}
 	}
 	const (
-		minBackoff = 2 * time.Second
+		// The floor is 30s, not a second or two, because the broker limits
+		// new MQTT connections to roughly 5 per 5 minutes per account. From
+		// 30s the doubling gives 4 attempts in the first five minutes of an
+		// outage (0s, 30s, 90s, 210s); from 2s it gives 8, which would trip
+		// the limit exactly when the network is already unhappy. Nothing
+		// here needs to recover faster than that — a dropped stream is
+		// noticed within readTimeout anyway.
+		minBackoff = 30 * time.Second
 		maxBackoff = 2 * time.Minute
 		// A connection that lasted this long was healthy, so the next
 		// failure starts over from minBackoff rather than inheriting a
