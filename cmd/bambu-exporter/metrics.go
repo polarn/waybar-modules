@@ -259,7 +259,7 @@ func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool, 
 			continue
 		}
 		seenHMS[code] = true
-		e.gauge("bambulab_hms_active", "One per fault the printer currently has latched. Codes are searchable at e.bambulab.com; severity is fatal, serious, common or unknown.", 1,
+		e.gauge("bambulab_hms_active", "One per entry in the printer's HMS list. Each carries an event timestamp, and whether the list means \"active now\" or \"seen since boot\" is not established — see pkg/bambu/hms.go. severity is fatal, serious, common or unknown; note serious is the modal bucket, not an escalation.", 1,
 			"printer_name", printer, "code", code, "severity", bambu.HMSSeverity(h.Code))
 	}
 
