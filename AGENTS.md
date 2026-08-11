@@ -199,6 +199,12 @@ Prometheus text is hand-rolled in `cmd/bambu-exporter/metrics.go` — client_gol
 
 Naming follows `bambulab_*` with base-unit suffixes and a `printer_name` label, close to Grafana dashboard 25033 so it is a usable starting point — but not identical, see the layers note above. **A metric is emitted only when the printer reported the field**: absent must not become a confident zero. Keep the printer serial out of labels; it is credential-adjacent and would end up in dashboard screenshots.
 
+**Never name a label `job`** — or `instance`, `pod`, `namespace`, `container`, `endpoint`, `service`. The kube-prometheus-stack scrape attaches its own, and Prometheus silently renames the colliding one to `exported_<name>`. `bambulab_print_job_info` shipped with a `job` label and the dashboard's `{{job}}` rendered "bambu-exporter" instead of the print name for months. It is `title` now.
+
+Two other own-goals promtool will not always catch: two samples of one family with an *identical* label set is a scrape error, so anything derived from a repeated array (`hms`, `lights_report`) needs deduplicating; and a family whose samples carry different label *keys* is merely bad form, but an empty label value is indistinguishable from an absent label in Prometheus, so conditionally-present labels are best emitted as `""`.
+
+`bambulab_prints_total` and `bambulab_filament_grams_total` are the only counters, and the only state the exporter holds — see `jobwatch.go`. They are in-process and unpersisted on purpose: a volume would cost the container its `readOnlyRootFilesystem`, and a counter reset is something Prometheus already models. Query them with `increase()`.
+
 ### Token expiry
 
 Renewal is interactive, so an unattended deployment breaks about quarterly. `bambulab_cloud_auth_ok` goes to 0 when the cloud rejects the token and the process keeps serving rather than crash-looping (a crash loop would hide the reason, and retrying in-process cannot help — the token is baked into the environment until the pod restarts). `TokenExpiry()` reads the JWT `exp` claim, but **not every token is a JWT**: the emailed-code login flow mints opaque ones, and this printer's account has one, so `bambulab_cloud_token_age_seconds` is the portable early warning.
