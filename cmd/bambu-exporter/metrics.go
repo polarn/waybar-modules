@@ -107,7 +107,7 @@ var printStates = []string{"IDLE", "PREPARE", "SLICING", "RUNNING", "PAUSE", "FI
 // actually reported it. Absent is not zero — publishing a default would
 // reproduce the bug this whole exporter grew out of, where a missing
 // chamber field graphed as a confident 0 °C.
-func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool) string {
+func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool, tasks *taskCache) string {
 	e := newExposition()
 	pn := []string{"printer_name", printer}
 
@@ -180,14 +180,91 @@ func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool) 
 	}
 	num("bambulab_print_stage", "Current stage code; see StageName for the printer's own wording.", rep.Print.StgCur, pn...)
 	num("bambulab_print_error_code", "Printer error code, 0 when healthy.", rep.Print.PrintError, pn...)
+	num("bambulab_mc_print_error_code", "Motion-controller error code, 0 when healthy.", rep.Print.McPrintErrorCode, pn...)
+	num("bambulab_print_fail_reason", "Failure reason code for the last print, 0 when none.", rep.Print.FailReason, pn...)
 	num("bambulab_speed_level", "Speed profile: 1 silent, 2 standard, 3 sport, 4 ludicrous.", rep.Print.SpdLvl, pn...)
 	num("bambulab_speed_magnitude_percent", "Speed as a percentage of standard.", rep.Print.SpdMag, pn...)
+	// The number is already in bambulab_print_stage; this carries the
+	// printer's own wording so a state timeline needs no lookup table in
+	// the dashboard. Idle stages are named too ("idle", "printing") rather
+	// than omitted, so the series stays continuous.
+	if s := rep.Print.StgCur; s != nil {
+		e.gauge("bambulab_print_stage_info", "The printer's own wording for the current stage, as a label.", 1,
+			"printer_name", printer, "stage", bambu.StageName(s.Int()))
+	}
+	if p := bambu.SpeedProfile(rep.Print.SpdLvl); p != "" {
+		e.gauge("bambulab_speed_profile_info", "Name of the speed profile in bambulab_speed_level, as a label.", 1,
+			"printer_name", printer, "profile", p)
+	}
 	// Nozzle diameter is configuration rather than telemetry, and naming it
 	// in Prometheus base units would mean graphing 0.0004 m. It reads
 	// better as a label on an info metric.
 	if d := rep.Print.NozzleDiameter; d != nil {
 		e.gauge("bambulab_nozzle_info", "Installed nozzle, as labels.", 1,
-			"printer_name", printer, "diameter_mm", formatValue(float64(*d)))
+			"printer_name", printer, "diameter_mm", formatValue(float64(*d)),
+			"type", rep.Print.NozzleType)
+	}
+	// Scale is undocumented — 0 on a new nozzle is all this printer has
+	// shown so far — hence no unit in the name.
+	if n := rep.Print.Device.Nozzle.Info; len(n) > 0 {
+		num("bambulab_nozzle_wear", "Nozzle wear as the printer reports it; the scale is undocumented.", n[0].Wear, pn...)
+	}
+
+	// Firmware, so an upgrade shows up as an annotation-worthy change in
+	// the graphs. `visible` is not filtered on: the submodules it hides
+	// (motion controller, toolhead) are the ones worth knowing the version
+	// of when something misbehaves.
+	if m, ok := rep.OTAModule(); ok {
+		e.gauge("bambulab_printer_info", "Printer model and firmware version, as labels.", 1,
+			"printer_name", printer, "model", m.ProductName, "firmware", m.SWVer)
+	}
+	seenModule := make(map[string]bool)
+	for _, m := range rep.Info.Module {
+		if m.Name == "" || seenModule[m.Name] {
+			continue
+		}
+		seenModule[m.Name] = true
+		e.gauge("bambulab_module_info", "Hardware and firmware revision per reported module, as labels.", 1,
+			"printer_name", printer, "module", m.Name, "product_name", m.ProductName,
+			"hw_ver", m.HWVer, "sw_ver", m.SWVer)
+	}
+	num("bambulab_firmware_new_version_state", "upgrade_state.new_version_state as reported. Each value's meaning is undocumented, so this is the raw number and not a boolean (this printer reports 2 while up to date).",
+		rep.Print.UpgradeState.NewVersionState, pn...)
+
+	// One series per latched fault. Deduplicated because two identical
+	// entries would be two samples with the same label set, which is a
+	// scrape error rather than a merely odd graph.
+	seenHMS := make(map[string]bool)
+	for _, h := range rep.Print.HMS {
+		code := bambu.HMSCode(h.Attr, h.Code)
+		if code == "" || seenHMS[code] {
+			continue
+		}
+		seenHMS[code] = true
+		e.gauge("bambulab_hms_active", "One per fault the printer currently has latched. Codes are searchable at e.bambulab.com; severity is fatal, serious, common or unknown.", 1,
+			"printer_name", printer, "code", code, "severity", bambu.HMSSeverity(h.Code))
+	}
+
+	seenLight := make(map[string]bool)
+	for _, l := range rep.Print.LightsReport {
+		if l.Node == "" || seenLight[l.Node] {
+			continue
+		}
+		seenLight[l.Node] = true
+		// mode is not a boolean — work_light reports "flashing" — so this is
+		// an info metric rather than a 0/1 gauge.
+		e.gauge("bambulab_light_mode_info", "Light state as a label; mode is on, off or flashing.", 1,
+			"printer_name", printer, "light", l.Node, "mode", l.Mode)
+	}
+
+	// Timelapse recording stops silently when the internal storage fills.
+	if f := rep.Print.IPCam.TLInternalFreeKB; f != nil {
+		e.gauge("bambulab_timelapse_storage_free_bytes", "Free space on the printer's internal timelapse storage.",
+			float64(*f)*1024, pn...) // reported in kibibytes
+	}
+	if t := rep.Print.IPCam.TLInternalTotalKB; t != nil {
+		e.gauge("bambulab_timelapse_storage_total_bytes", "Size of the printer's internal timelapse storage.",
+			float64(*t)*1024, pn...)
 	}
 
 	state := strings.ToUpper(rep.Print.GcodeState)
@@ -198,13 +275,25 @@ func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool) 
 		e.gauge("bambulab_print_state", "1 for the printer's current gcode state, 0 for the others.",
 			boolValue(s == state), "printer_name", printer, "state", s)
 	}
+	// printStates is a fixed list, so a firmware reporting anything outside
+	// it would read as all-zero and leave the real state invisible. This
+	// carries whatever the printer actually said.
+	e.gauge("bambulab_print_state_info", "The raw gcode_state as a label, including values outside the set bambulab_print_state enumerates.", 1,
+		"printer_name", printer, "state", state)
 
 	// The job name is an info metric so a new print doesn't fork every
 	// numeric series. Entities are decoded because MakerWorld titles arrive
 	// HTML-escaped ("Snake &apos;Long&apos;").
+	//
+	// The label is `title`, not `job`: kube-prometheus-stack's scrape
+	// attaches its own job="bambu-exporter", so Prometheus renamed ours to
+	// exported_job and every dashboard asking for {{job}} rendered the
+	// scrape job instead of the print. Do not name a label `job` here.
 	if job := html.UnescapeString(rep.Print.SubtaskName); job != "" {
-		e.gauge("bambulab_print_job_info", "Current job name, as a label.", 1,
-			"printer_name", printer, "job", job)
+		e.gauge("bambulab_print_job_info", "Current job name and provenance, as labels.", 1,
+			"printer_name", printer, "title", job,
+			"print_type", rep.Print.PrintType,
+			"model_id", rep.Print.ModelID, "design_id", rep.Print.DesignID)
 	}
 
 	fan := func(name string, n *bambu.Num) {
@@ -223,6 +312,14 @@ func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool) 
 		e.gauge("bambulab_wifi_signal_dbm", "Wi-Fi signal strength.", float64(dbm), pn...)
 	}
 
+	// Which slot is feeding, resolved once — tray_now is AMS-global, so it
+	// has to be decomposed rather than compared per unit.
+	_, activeAMS, activeSlot, haveActive := rep.ActiveFilament()
+	if n := rep.Print.AMS.TrayNow; n != nil && haveActive {
+		e.gauge("bambulab_ams_active_tray", "Global index of the slot feeding the hotend, four per AMS unit. Absent when nothing is loaded; see bambulab_ams_tray_active for the per-slot form.",
+			float64(n.Int()), pn...)
+	}
+
 	for i, unit := range rep.Print.AMS.AMS {
 		ams := strconv.Itoa(i)
 		al := []string{"printer_name", printer, "ams", ams}
@@ -233,22 +330,115 @@ func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool) 
 			e.gauge("bambulab_ams_drying_remaining_seconds", "Time left in an active drying run, 0 when not drying.",
 				float64(*d)*60, al...) // reported in minutes
 		}
-		for j, tray := range unit.Tray {
+		for j := range unit.Tray {
+			tray := &unit.Tray[j]
 			tl := []string{"printer_name", printer, "ams", ams, "tray", strconv.Itoa(j)}
+
+			// An empty slot used to emit nothing at all, which made it
+			// indistinguishable from an AMS that had been unplugged. ok is
+			// false when the printer reported no bitfield, and then this
+			// stays absent rather than claiming the slot is empty.
+			if present, ok := rep.TrayPresent(i, j); ok {
+				e.gauge("bambulab_ams_tray_present", "1 when the slot holds a spool, 0 when it is empty.",
+					boolValue(present), tl...)
+			}
+			// All zero means nothing is loaded, which is real information;
+			// the family is absent entirely when the printer did not say.
+			if rep.Print.AMS.TrayNow != nil {
+				e.gauge("bambulab_ams_tray_active", "1 for the slot feeding the hotend, 0 for the rest.",
+					boolValue(haveActive && i == activeAMS && j == activeSlot), tl...)
+			}
+
 			// remain is -1 when the spool has no usable estimate; emitting
 			// that as a percentage would graph as a real reading.
 			if tray.Remain != nil && tray.Remain.Int() >= 0 {
 				e.gauge("bambulab_ams_tray_remaining_percent", "Filament remaining on the spool.",
 					float64(*tray.Remain), tl...)
 			}
-			name := tray.TraySubBrands
-			if name == "" {
-				name = tray.TrayType
+			// Nominal, not current: grams left is this times the remaining
+			// percentage, which is left to PromQL rather than exported as a
+			// third metric derived from two others.
+			num("bambulab_ams_tray_weight_grams", "Weight of a full spool of this filament.", tray.TrayWeight, tl...)
+			// Base units, per promtool: the printer reports millimetres of
+			// filament and whole hours of drying, both converted here.
+			if l := tray.TotalLen; l != nil {
+				e.gauge("bambulab_ams_tray_length_meters", "Filament length on a full spool.",
+					float64(*l)/1000, tl...)
 			}
-			if name != "" {
-				e.gauge("bambulab_ams_tray_info", "Loaded filament per slot, as labels.", 1,
-					"printer_name", printer, "ams", ams, "tray", strconv.Itoa(j),
-					"type", tray.TrayType, "name", name, "color", tray.TrayColor)
+			num("bambulab_ams_tray_nozzle_temp_min_celsius", "Lowest nozzle temperature this filament is rated for.", tray.NozzleTempMin, tl...)
+			num("bambulab_ams_tray_nozzle_temp_max_celsius", "Highest nozzle temperature this filament is rated for.", tray.NozzleTempMax, tl...)
+			num("bambulab_ams_tray_drying_temperature_celsius", "Drying temperature this filament wants.", tray.DryingTemp, tl...)
+			if d := tray.DryingTime; d != nil {
+				e.gauge("bambulab_ams_tray_drying_seconds", "Drying time this filament wants.",
+					float64(*d)*3600, tl...)
+			}
+			num("bambulab_ams_tray_state", "Raw slot state from the firmware. The values have no published meaning (11 idle and 27 feeding are observations, not a contract) — use bambulab_ams_tray_active instead.", tray.State, tl...)
+
+			if !tray.Loaded() {
+				continue
+			}
+			diameter := ""
+			if d := tray.TrayDiameter; d != nil {
+				diameter = formatValue(float64(*d))
+			}
+			// Left empty when the printer reported no bitfield, so an
+			// unknown spool is not labelled as a third-party one.
+			bbl := ""
+			if v, ok := rep.TrayIsBBL(i, j); ok {
+				bbl = strconv.FormatBool(v)
+			}
+			e.gauge("bambulab_ams_tray_info", "Loaded filament per slot, as labels.", 1,
+				"printer_name", printer, "ams", ams, "tray", strconv.Itoa(j),
+				"type", tray.TrayType, "name", tray.Name(), "color", tray.TrayColor,
+				"code", tray.TrayInfoIdx, "id_name", tray.TrayIDName,
+				"spool_uid", tray.TagUID, "diameter_mm", diameter, "bbl", bbl)
+		}
+	}
+
+	// The filament actually being printed with, as one series. This is what
+	// makes "which spool did that print use" answerable after the fact —
+	// per-slot info alone cannot say which slot was feeding.
+	if tray, ams, slot, ok := rep.ActiveFilament(); ok && tray.Loaded() {
+		e.gauge("bambulab_print_filament_info", "The filament feeding the hotend, as labels.", 1,
+			"printer_name", printer, "ams", strconv.Itoa(ams), "tray", strconv.Itoa(slot),
+			"type", tray.TrayType, "name", tray.Name(), "color", tray.TrayColor,
+			"spool_uid", tray.TagUID)
+	}
+
+	// The external spool holder. This firmware reports it as vir_slot and
+	// has no vt_tray key at all, so it is always present and usually empty
+	// — hence the Loaded gate, or every scrape would carry a blank spool.
+	for i := range rep.Print.VirSlot {
+		slot := &rep.Print.VirSlot[i]
+		if !slot.Loaded() {
+			continue
+		}
+		idx := strconv.Itoa(i)
+		if slot.Remain != nil && slot.Remain.Int() >= 0 {
+			e.gauge("bambulab_external_spool_remaining_percent", "Filament remaining on the external spool.",
+				float64(*slot.Remain), "printer_name", printer, "slot", idx)
+		}
+		e.gauge("bambulab_external_spool_info", "Filament on the external spool holder, as labels.", 1,
+			"printer_name", printer, "slot", idx,
+			"type", slot.TrayType, "name", slot.Name(), "color", slot.TrayColor)
+	}
+
+	// The sliced job from the cloud tasks API, already polled for the
+	// status page's plate render. Weight is the only source of filament
+	// grams anywhere in the pipeline — the MQTT report never gives it.
+	if tasks != nil {
+		if t, ok := tasks.get(); ok {
+			if t.Weight > 0 {
+				e.gauge("bambulab_print_task_weight_grams", "Filament the slicer estimated for the most recent job.", t.Weight, pn...)
+			}
+			if t.CostTime > 0 {
+				e.gauge("bambulab_print_task_duration_seconds", "How long the most recent job took.", float64(t.CostTime), pn...)
+			}
+			// Raw: the code-to-outcome mapping is not documented, and
+			// guessing names for it would be worse than a number.
+			e.gauge("bambulab_print_task_status", "Status code of the most recent cloud task, as reported.", float64(t.Status), pn...)
+			if ts, err := time.Parse(time.RFC3339, t.StartTime); err == nil {
+				e.gauge("bambulab_print_task_start_timestamp_seconds", "When the most recent job started.", float64(ts.Unix()), pn...)
 			}
 		}
 	}

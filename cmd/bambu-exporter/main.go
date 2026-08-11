@@ -80,19 +80,23 @@ func main() {
 		}
 	}()
 
-	metricsMux := http.NewServeMux()
-	metricsMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		fmt.Fprint(w, collect(printer, &st, sess, authOK.Load()))
-	})
-
 	// The plate render from the cloud tasks API. Not the camera: a live
 	// stream needs LAN-only mode + LAN Only Liveview, which would disable
 	// Bambu Cloud entirely (the report shows ipcam.rtsp_url "disable" and
 	// ipcam.tutk_server "enable" — cloud video rides ThroughTek P2P).
+	//
+	// It also carries the only filament-grams figure in the whole pipeline,
+	// which is why /metrics reads it too and this is constructed before the
+	// handler that closes over it.
 	tasks := newTaskCache(sess.AccessToken, serial)
 	go tasks.run(ctx.Done(), func(f string, a ...any) {
 		log.Printf("bambu-exporter: "+f, a...)
+	})
+
+	metricsMux := http.NewServeMux()
+	metricsMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		fmt.Fprint(w, collect(printer, &st, sess, authOK.Load(), tasks))
 	})
 
 	appMux := http.NewServeMux()
