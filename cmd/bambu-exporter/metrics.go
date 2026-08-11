@@ -18,6 +18,7 @@ import (
 // dependencies beyond what's in go.mod").
 
 type family struct {
+	typ     string // "gauge" or "counter"
 	help    string
 	samples []string
 }
@@ -35,9 +36,19 @@ func newExposition() *exposition {
 // Samples of the same metric are grouped, so HELP/TYPE is emitted once
 // and each family stays contiguous as the format requires.
 func (e *exposition) gauge(name, help string, v float64, labels ...string) {
+	e.sample("gauge", name, help, v, labels...)
+}
+
+// counter records one monotonic sample. Only the _total families use it;
+// everything sourced from a report snapshot is a gauge.
+func (e *exposition) counter(name, help string, v float64, labels ...string) {
+	e.sample("counter", name, help, v, labels...)
+}
+
+func (e *exposition) sample(typ, name, help string, v float64, labels ...string) {
 	f, ok := e.fams[name]
 	if !ok {
-		f = &family{help: help}
+		f = &family{typ: typ, help: help}
 		e.fams[name] = f
 		e.order = append(e.order, name)
 	}
@@ -49,7 +60,7 @@ func (e *exposition) String() string {
 	for _, name := range e.order {
 		f := e.fams[name]
 		fmt.Fprintf(&b, "# HELP %s %s\n", name, escapeHelp(f.help))
-		fmt.Fprintf(&b, "# TYPE %s gauge\n", name)
+		fmt.Fprintf(&b, "# TYPE %s %s\n", name, f.typ)
 		for _, s := range f.samples {
 			b.WriteString(s)
 			b.WriteByte('\n')
@@ -107,9 +118,16 @@ var printStates = []string{"IDLE", "PREPARE", "SLICING", "RUNNING", "PAUSE", "FI
 // actually reported it. Absent is not zero — publishing a default would
 // reproduce the bug this whole exporter grew out of, where a missing
 // chamber field graphed as a confident 0 °C.
-func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool, tasks *taskCache) string {
+func collect(printer string, st *bambu.State, sess *bambu.Session, authOK bool, tasks *taskCache, jobs *jobWatch) string {
 	e := newExposition()
 	pn := []string{"printer_name", printer}
+
+	// Counters first, and outside the report guard below: they are the one
+	// thing that stays meaningful when the printer is off, and losing the
+	// history to a powered-down printer would defeat the point.
+	if jobs != nil {
+		jobs.collect(e, printer)
+	}
 
 	e.gauge("bambulab_cloud_auth_ok",
 		"1 while the cloud accepts the cached token, 0 once it has been rejected (needs an interactive bambu-ctl login).",

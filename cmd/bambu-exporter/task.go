@@ -22,6 +22,10 @@ type taskCache struct {
 	token  string
 	serial string
 
+	// nudge short-circuits the interval. Buffered to one: several requests
+	// before the poller wakes are the same request.
+	nudge chan struct{}
+
 	mu    sync.RWMutex
 	task  *bambu.Task
 	cover []byte
@@ -29,7 +33,17 @@ type taskCache struct {
 }
 
 func newTaskCache(token, serial string) *taskCache {
-	return &taskCache{token: token, serial: serial}
+	return &taskCache{token: token, serial: serial, nudge: make(chan struct{}, 1)}
+}
+
+// refreshSoon asks the poller to fetch now rather than waiting out the
+// interval, for when something has just made the cached task stale — a
+// print finishing, whose filament weight only exists here. Never blocks.
+func (c *taskCache) refreshSoon() {
+	select {
+	case c.nudge <- struct{}{}:
+	default:
+	}
 }
 
 // run refreshes until ctx is done. Transient failures are logged and
@@ -55,6 +69,7 @@ func (c *taskCache) run(done <-chan struct{}, logf func(string, ...any)) {
 		select {
 		case <-done:
 			return
+		case <-c.nudge:
 		case <-time.After(every):
 		}
 	}

@@ -93,10 +93,17 @@ func main() {
 		log.Printf("bambu-exporter: "+f, a...)
 	})
 
+	// Print outcomes and filament consumption, which no snapshot of the
+	// current report can supply — see jobwatch.go.
+	jobs := newJobWatch(tasks)
+	go jobs.run(ctx.Done(), &st, func(f string, a ...any) {
+		log.Printf("bambu-exporter: "+f, a...)
+	})
+
 	metricsMux := http.NewServeMux()
 	metricsMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		fmt.Fprint(w, collect(printer, &st, sess, authOK.Load(), tasks))
+		fmt.Fprint(w, collect(printer, &st, sess, authOK.Load(), tasks, jobs))
 	})
 
 	appMux := http.NewServeMux()
