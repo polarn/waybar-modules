@@ -121,6 +121,11 @@ func stream(ctx context.Context, s *Session, serial string, st *State, logf func
 		if !pushall() {
 			return
 		}
+		// Once per connection, not on resync: firmware cannot change while
+		// the socket is up, and the merged state keeps the answer.
+		if !send(func() error { return writePublish(conn, requestTopic, versionPayload) }) {
+			return
+		}
 		ping := time.NewTicker(pingEvery)
 		defer ping.Stop()
 		resync := time.NewTicker(resyncEvery)

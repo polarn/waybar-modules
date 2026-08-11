@@ -21,6 +21,16 @@ const Broker = "us.mqtt.bambulab.com:8883"
 // off the partial pushes.
 var pushallPayload = []byte(`{"pushing":{"sequence_id":"0","command":"pushall"}}`)
 
+// versionPayload asks for the hardware/firmware inventory, which arrives
+// on the report topic as an `info` object rather than inside `print`.
+//
+// Worth asking for explicitly: the printer only volunteers it when
+// something else on the account (Handy, the slicer) requests it, and every
+// subscriber sees that answer. Waiting for one meant the firmware metrics
+// showed up hours or days after a restart, or not at all. Unlike pushall
+// this is not rate-limited.
+var versionPayload = []byte(`{"info":{"sequence_id":"0","command":"get_version"}}`)
+
 // Minimal MQTT 3.1.1 framing — just enough for this exchange (CONNECT,
 // one SUBSCRIBE, one QoS-0 PUBLISH, then read PUBLISHes until the report
 // arrives). Hand-rolled to keep the repo dependency-light; a full client
