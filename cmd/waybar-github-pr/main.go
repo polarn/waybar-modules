@@ -47,8 +47,8 @@ type Notification struct {
 // after start we baseline (mark all current as seen) so the user doesn't
 // get a startup flood for pre-existing unread items.
 var (
-	seenNotifs       = make(map[string]bool)
-	notifsBaselined  = false
+	seenNotifs      = make(map[string]bool)
+	notifsBaselined = false
 
 	// Remembers whether a notification's subject PR was merged/closed, keyed
 	// by subject URL + updated_at. New activity on the thread (including a
@@ -63,6 +63,10 @@ func main() {
 	var notify bool
 	var swiftbar bool
 	var notifyReasonsCSV string
+	var runsEnabled bool
+	var watchRunsCSV string
+	var runsTTL time.Duration
+	var discoverOnly bool
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
@@ -70,10 +74,34 @@ func main() {
 	flag.StringVar(&notifyReasonsCSV, "notify-reasons",
 		"mention,team_mention,review_requested,assign,comment,author",
 		"Comma-separated reasons that should produce notify-send + count toward the pill")
+	flag.BoolVar(&runsEnabled, "runs", true,
+		"Track GitHub Actions runs that need attention (waiting on my approval, or dispatched by me and still going)")
+	flag.StringVar(&watchRunsCSV, "watch-runs", "",
+		"Extra owner/repo entries to poll for runs, comma-separated — unioned with the auto-discovered set")
+	flag.DurationVar(&runsTTL, "runs-ttl", time.Hour,
+		"How long the discovered set of reviewer-gated repos stays cached before re-scanning")
+	flag.BoolVar(&discoverOnly, "discover-only", false,
+		"Print the discovered reviewer-gated repos and exit")
 	flag.Parse()
 
 	if open {
 		openPRs()
+		return
+	}
+
+	var watchRuns []string
+	for _, r := range strings.Split(watchRunsCSV, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			watchRuns = append(watchRuns, r)
+		}
+	}
+
+	if discoverOnly {
+		repos, login := watchedRepos(watchRuns, runsTTL)
+		fmt.Printf("login: %s\n", login)
+		for _, r := range repos {
+			fmt.Println(r)
+		}
 		return
 	}
 
@@ -104,6 +132,21 @@ func main() {
 			continue
 		}
 
+		// Runs are fetched independently of the PR calls above: a repo that
+		// fails to answer must not blank the PR counts. When any watched repo
+		// fails, runsResult.Complete goes false and the run segment is omitted
+		// entirely rather than reported as a count that is quietly short.
+		// The zero runsResult has Complete false, so disabling runs omits the
+		// segment by the same path a failed poll does.
+		var runs runsResult
+		var approvalRuns, runningRuns []Run
+		if runsEnabled && !swiftbar {
+			repos, login := watchedRepos(watchRuns, runsTTL)
+			runs = fetchRuns(repos, login)
+			approvalRuns, runningRuns = splitRuns(runs.Runs)
+			notifyApprovals(approvalRuns, notify)
+		}
+
 		var tooltips []string
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
@@ -127,7 +170,7 @@ func main() {
 		// filtered count into the pill / tooltip / left-click menu.
 		notifs := processNotifications(notifyReasons, notify)
 		if !swiftbar {
-			writePRCache(all, approved, notifs)
+			writePRCache(all, approved, notifs, runs.Runs)
 		}
 
 		if swiftbar {
@@ -138,6 +181,14 @@ func main() {
 		text := fmt.Sprintf("%d·%d", len(approved), len(all))
 		if len(notifs) > 0 {
 			text += fmt.Sprintf(" 󰂜 %d", len(notifs))
+		}
+		if runs.Complete {
+			if n := len(approvalRuns); n > 0 {
+				text += fmt.Sprintf(" 󰥔 %d", n)
+			}
+			if n := len(runningRuns); n > 0 {
+				text += fmt.Sprintf(" 󰑐 %d", n)
+			}
 		}
 
 		if len(notifs) > 0 {
@@ -152,10 +203,43 @@ func main() {
 			}
 		}
 
+		if runs.Complete && len(runs.Runs) > 0 {
+			tooltips = append(tooltips, "")
+			tooltips = append(tooltips, "<b>Workflow runs</b>")
+			for _, r := range append(append([]Run{}, approvalRuns...), runningRuns...) {
+				glyph := "󰑐"
+				suffix := ""
+				if r.NeedsMe {
+					glyph = "󰥔"
+					if r.Environment != "" {
+						suffix = " · " + pangoEscape(r.Environment)
+					}
+				}
+				line := fmt.Sprintf("  %s [%s] %s%s", glyph,
+					pangoEscape(r.Repo), pangoEscape(trimRunes(r.Title(), 60)), suffix)
+				tooltips = append(tooltips, line)
+			}
+		}
+
 		w := waybar.New()
 		w.Text = text
 		w.ToolTip = strings.Join(tooltips, "\n")
-		w.Class = status
+		// class carries two independent dimensions, so it goes out as an
+		// array: the PR status, plus the run state when there is one.
+		//
+		// Gated on runs.Complete for the same reason the text and tooltip
+		// are: an incomplete poll must not colour the pill for a state it
+		// cannot also show a count for.
+		classes := []string{status}
+		if runs.Complete {
+			if len(runningRuns) > 0 {
+				classes = append(classes, "running")
+			}
+			if len(approvalRuns) > 0 {
+				classes = append(classes, "approval")
+			}
+		}
+		w.Class = classes
 		w.Alt = status
 
 		if err := w.Print(); err != nil {
@@ -344,10 +428,11 @@ type PRCache struct {
 	All           []PR           `json:"all"`
 	Approved      []PR           `json:"approved"`
 	Notifications []Notification `json:"notifications,omitempty"`
+	Runs          []Run          `json:"runs,omitempty"`
 }
 
-func writePRCache(all, approved []PR, notifs []Notification) {
-	data, err := json.Marshal(PRCache{All: all, Approved: approved, Notifications: notifs})
+func writePRCache(all, approved []PR, notifs []Notification, runs []Run) {
+	data, err := json.Marshal(PRCache{All: all, Approved: approved, Notifications: notifs, Runs: runs})
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
 		return
@@ -402,6 +487,24 @@ func openPRs() {
 			url:   pr.URL,
 		})
 	}
+	for _, r := range cache.Runs {
+		// The run ID keeps labels unique: the picker matches the fuzzel
+		// selection back by exact label equality, so two runs of the same
+		// workflow in the same repo would otherwise collide.
+		prefix, suffix := "󰑐", ""
+		if r.NeedsMe {
+			prefix = "󰥔"
+			suffix = " · needs approval"
+			if r.Environment != "" {
+				suffix = " · needs approval (" + r.Environment + ")"
+			}
+		}
+		items = append(items, item{
+			label: fmt.Sprintf("%s [%s] %s%s #%d", prefix, r.Repo, r.Title(), suffix, r.ID),
+			url:   r.HTMLURL,
+		})
+	}
+
 	for _, n := range cache.Notifications {
 		items = append(items, item{
 			label: fmt.Sprintf("󰂜 [%s] [%s] %s", n.Reason, n.Repository.FullName, n.Subject.Title),
@@ -436,4 +539,29 @@ func openPRs() {
 			return
 		}
 	}
+}
+
+// trimRunes shortens s to at most n runes, appending an ellipsis when it had
+// to cut. Rune-based on purpose: the older byte slicing in this file can split
+// a multi-byte character and emit invalid UTF-8.
+func trimRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 3 {
+		return string(r[:n])
+	}
+	return string(r[:n-3]) + "..."
+}
+
+// pangoEscape makes text safe for the tooltip, which waybar renders as Pango
+// markup. A run title containing & or < would otherwise break rendering of the
+// whole tooltip, not just its own line.
+func pangoEscape(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(s)
 }
