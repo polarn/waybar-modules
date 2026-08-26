@@ -159,7 +159,11 @@ Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
 
 ### Workflow runs
 
-The pill also carries GitHub Actions runs needing attention: **approval** (stopped at a deployment gate this user can release) and **running** (dispatched by this user, still queued/in progress). Code lives in `runs.go` — the one split in this repo besides `bambu-exporter`, justified because it owns its own cache, TTL, concurrency and notify state, none of which the PR loop touches.
+The pill also carries GitHub Actions runs needing attention: **approval** (stopped at a deployment gate this user can release), **running** (dispatched by this user, still queued/in progress), and **failed** (dispatched by this user and finished badly).
+
+`failed` exists because the other two states are both transient, and a run that ends in `failure` would otherwise disappear from the pill exactly like a successful one — a broken production apply going quiet is the precise thing this feature is meant to prevent. It therefore sticks until acknowledged: selecting it in the picker records its ID in `dismissed-runs.json` next to the discovery cache, which the daemon reads each tick to filter it out. That file is written only by the short-lived `--open` process and read only by the daemon, so they never contend for it; entries are pruned after 7 days, long after a run drops out of the 20-entry API window. `cancelled` is deliberately not a failure — you cancelled it, so you already know.
+
+Note the running state is genuinely narrow: a gated `terraform apply` here took 47 s against a 60 s poll, so green is often missed entirely. That is expected and not worth chasing with a faster interval — the approval gate, the state that actually blocks, sits for minutes or hours and is always caught. Code lives in `runs.go` — the one split in this repo besides `bambu-exporter`, justified because it owns its own cache, TTL, concurrency and notify state, none of which the PR loop touches.
 
 Four dead ends, so they are not rediscovered:
 

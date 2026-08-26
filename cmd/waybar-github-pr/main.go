@@ -139,11 +139,11 @@ func main() {
 		// The zero runsResult has Complete false, so disabling runs omits the
 		// segment by the same path a failed poll does.
 		var runs runsResult
-		var approvalRuns, runningRuns []Run
+		var approvalRuns, runningRuns, failedRuns []Run
 		if runsEnabled && !swiftbar {
 			repos, login := watchedRepos(watchRuns, runsTTL)
 			runs = fetchRuns(repos, login)
-			approvalRuns, runningRuns = splitRuns(runs.Runs)
+			approvalRuns, runningRuns, failedRuns = splitRuns(runs.Runs)
 			notifyApprovals(approvalRuns, notify)
 		}
 
@@ -189,6 +189,9 @@ func main() {
 			if n := len(runningRuns); n > 0 {
 				text += fmt.Sprintf(" 󰑐 %d", n)
 			}
+			if n := len(failedRuns); n > 0 {
+				text += fmt.Sprintf(" 󰀨 %d", n)
+			}
 		}
 
 		if len(notifs) > 0 {
@@ -206,14 +209,19 @@ func main() {
 		if runs.Complete && len(runs.Runs) > 0 {
 			tooltips = append(tooltips, "")
 			tooltips = append(tooltips, "<b>Workflow runs</b>")
-			for _, r := range append(append([]Run{}, approvalRuns...), runningRuns...) {
+			ordered := append(append(append([]Run{}, approvalRuns...), failedRuns...), runningRuns...)
+			for _, r := range ordered {
 				glyph := "󰑐"
 				suffix := ""
-				if r.NeedsMe {
+				switch {
+				case r.NeedsMe:
 					glyph = "󰥔"
 					if r.Environment != "" {
 						suffix = " · " + pangoEscape(r.Environment)
 					}
+				case r.Failed:
+					glyph = "󰀨"
+					suffix = " · " + pangoEscape(r.Conclusion)
 				}
 				line := fmt.Sprintf("  %s [%s] %s%s", glyph,
 					pangoEscape(r.Repo), pangoEscape(trimRunes(r.Title(), 60)), suffix)
@@ -237,6 +245,12 @@ func main() {
 			}
 			if len(approvalRuns) > 0 {
 				classes = append(classes, "approval")
+			}
+			// Declared last in style.css too: a failure is an unexpected bad
+			// state and must never be masked by an expected one. Both counts
+			// stay visible in the text either way.
+			if len(failedRuns) > 0 {
+				classes = append(classes, "failed")
 			}
 		}
 		w.Class = classes
@@ -475,6 +489,9 @@ func openPRs() {
 	type item struct {
 		label string
 		url   string
+		// Non-zero for a failed run: opening it is also how you acknowledge
+		// it, which is what stops the daemon resurfacing it next tick.
+		dismiss int64
 	}
 	var items []item
 	for _, pr := range cache.All {
@@ -492,16 +509,23 @@ func openPRs() {
 		// selection back by exact label equality, so two runs of the same
 		// workflow in the same repo would otherwise collide.
 		prefix, suffix := "󰑐", ""
-		if r.NeedsMe {
+		var dismiss int64
+		switch {
+		case r.NeedsMe:
 			prefix = "󰥔"
 			suffix = " · needs approval"
 			if r.Environment != "" {
 				suffix = " · needs approval (" + r.Environment + ")"
 			}
+		case r.Failed:
+			prefix = "󰀨"
+			suffix = " · " + r.Conclusion
+			dismiss = r.ID
 		}
 		items = append(items, item{
-			label: fmt.Sprintf("%s [%s] %s%s #%d", prefix, r.Repo, r.Title(), suffix, r.ID),
-			url:   r.HTMLURL,
+			label:   fmt.Sprintf("%s [%s] %s%s #%d", prefix, r.Repo, r.Title(), suffix, r.ID),
+			url:     r.HTMLURL,
+			dismiss: dismiss,
 		})
 	}
 
@@ -516,7 +540,7 @@ func openPRs() {
 		return
 	}
 	if len(items) == 1 {
-		exec.Command("xdg-open", items[0].url).Start()
+		openItem(items[0].url, items[0].dismiss)
 		return
 	}
 
@@ -535,10 +559,20 @@ func openPRs() {
 	selected := strings.TrimSpace(string(out))
 	for _, it := range items {
 		if it.label == selected {
-			exec.Command("xdg-open", it.url).Start()
+			openItem(it.url, it.dismiss)
 			return
 		}
 	}
+}
+
+// openItem hands a URL to the browser and, for a failed run, records the
+// dismissal first — the write must land before the daemon's next tick, so it
+// is done synchronously while xdg-open is not.
+func openItem(url string, dismiss int64) {
+	if dismiss != 0 {
+		dismissRun(dismiss)
+	}
+	exec.Command("xdg-open", url).Start()
 }
 
 // trimRunes shortens s to at most n runes, appending an ellipsis when it had

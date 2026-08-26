@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,13 +23,15 @@ type Run struct {
 	ID           int64  `json:"id"`
 	Name         string `json:"name"`
 	DisplayTitle string `json:"display_title"`
-	Status       string `json:"status"` // queued | in_progress | waiting
+	Status       string `json:"status"`     // queued | in_progress | waiting | completed
+	Conclusion   string `json:"conclusion"` // null while running; failure/success/... when completed
 	UpdatedAt    string `json:"updated_at"`
 	HTMLURL      string `json:"html_url"`
 
 	Repo        string `json:"repo"`        // owner/name; filled in by us
 	Environment string `json:"environment"` // only set for approval-pending runs
 	NeedsMe     bool   `json:"needs_me"`    // current_user_can_approve
+	Failed      bool   `json:"failed"`      // finished badly, sticks until dismissed
 }
 
 // Title prefers display_title (the rendered run title, e.g. "terraform apply
@@ -321,6 +324,8 @@ func fetchRuns(repos []string, login string) runsResult {
 		return res
 	}
 
+	dismissed := readDismissed()
+
 	for _, repo := range repos {
 		// Approval candidates deliberately span ALL actors: a colleague's run
 		// waiting on your review is exactly the case worth surfacing.
@@ -349,11 +354,22 @@ func fetchRuns(repos []string, login string) runsResult {
 			continue
 		}
 		for _, r := range mine.WorkflowRuns {
-			if r.Status != "queued" && r.Status != "in_progress" {
-				continue
+			switch {
+			case r.Status == "queued" || r.Status == "in_progress":
+				r.Repo = repo
+				res.Runs = append(res.Runs, r)
+			case r.Status == "completed" && failedConclusion(r.Conclusion):
+				// A failed run must not vanish the way a successful one
+				// does — a broken production apply going quiet is the
+				// exact thing this pill exists to prevent. It sticks
+				// until dismissed from the picker.
+				if dismissed[r.ID] {
+					continue
+				}
+				r.Repo = repo
+				r.Failed = true
+				res.Runs = append(res.Runs, r)
 			}
-			r.Repo = repo
-			res.Runs = append(res.Runs, r)
 		}
 	}
 
@@ -394,16 +410,19 @@ func approvableBy(repo string, runID int64, updatedAt string) (string, bool) {
 	return "", false
 }
 
-// splitRuns partitions runs into the two pill states.
-func splitRuns(runs []Run) (approval, running []Run) {
+// splitRuns partitions runs into the three pill states.
+func splitRuns(runs []Run) (approval, running, failed []Run) {
 	for _, r := range runs {
-		if r.NeedsMe {
+		switch {
+		case r.NeedsMe:
 			approval = append(approval, r)
-		} else {
+		case r.Failed:
+			failed = append(failed, r)
+		default:
 			running = append(running, r)
 		}
 	}
-	return approval, running
+	return approval, running, failed
 }
 
 // notifyApprovals fires notify-send once per run that has newly entered the
@@ -448,5 +467,78 @@ func notifyApprovals(approval []Run, enabled bool) {
 		if !present[id] {
 			delete(seenApprovals, id)
 		}
+	}
+}
+
+// failedConclusion reports whether a finished run ended in a way worth
+// flagging. "cancelled" is excluded on purpose: you cancelled it, so you
+// already know.
+func failedConclusion(c string) bool {
+	switch c {
+	case "failure", "timed_out", "startup_failure":
+		return true
+	}
+	return false
+}
+
+// Dismissals live next to the discovery cache rather than in
+// $XDG_RUNTIME_DIR, because a failure you have already looked at must not
+// come back after a logout. The file is written only by the --open picker
+// and read only by the daemon, so the two never contend for it.
+func dismissedPath() string {
+	return filepath.Join(filepath.Dir(repoCachePath()), "dismissed-runs.json")
+}
+
+// dismissRetention bounds the file. A run drops out of the 20-entry API
+// window long before this, so anything older is dead weight.
+const dismissRetention = 7 * 24 * time.Hour
+
+func readDismissed() map[int64]bool {
+	out := make(map[int64]bool)
+	data, err := os.ReadFile(dismissedPath())
+	if err != nil {
+		return out
+	}
+	var raw map[string]time.Time
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return out
+	}
+	for k, at := range raw {
+		id, err := strconv.ParseInt(k, 10, 64)
+		if err != nil || time.Since(at) > dismissRetention {
+			continue
+		}
+		out[id] = true
+	}
+	return out
+}
+
+// dismissRun records that a failed run has been looked at, so the daemon
+// stops surfacing it. Called from the --open path, which is a separate
+// short-lived process, hence the read-modify-write.
+func dismissRun(id int64) {
+	raw := make(map[string]time.Time)
+	if data, err := os.ReadFile(dismissedPath()); err == nil {
+		_ = json.Unmarshal(data, &raw)
+	}
+	for k, at := range raw {
+		if time.Since(at) > dismissRetention {
+			delete(raw, k)
+		}
+	}
+	raw[strconv.FormatInt(id, 10)] = time.Now()
+
+	path := dismissedPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		log.Printf("Error creating dismissal dir: %s", err)
+		return
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		log.Printf("Error marshaling dismissals: %s", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		log.Printf("Error writing dismissals: %s", err)
 	}
 }
