@@ -157,6 +157,25 @@ Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
 
 `--swiftbar` implies `--notify=false` (no `notify-send` on macOS) and skips the `$XDG_RUNTIME_DIR` cache write (the `--open` flow isn't used). Title is `approved·total :arrow.triangle.pull:`, with a `:bell.badge:` variant when there are unread notifications. Dropdown is a single `Open PRs | href=https://github.com/pulls` row — no per-PR list (intentionally simple; can be extended later by adding a list subcommand).
 
+### Workflow runs
+
+The pill also carries GitHub Actions runs needing attention: **approval** (stopped at a deployment gate this user can release) and **running** (dispatched by this user, still queued/in progress). Code lives in `runs.go` — the one split in this repo besides `bambu-exporter`, justified because it owns its own cache, TTL, concurrency and notify state, none of which the PR loop touches.
+
+Four dead ends, so they are not rediscovered:
+
+- **There is no cross-repo API for workflow runs.** GraphQL's `SearchType` enum has no run type, and `search` therefore cannot reach them. That is why the repo set has to be derived instead of queried.
+- **A deployment-review request generates no `/notifications` entry.** Checked with `?all=true` — every notification on the account is `PullRequest`-typed. So the existing notifications poll cannot be reused as the discovery channel.
+- **`actor=@me` is silently ignored by the REST runs endpoint** — it returns 0 rows rather than erroring. `@me` is a `gh search` extension, not a REST one. The literal login is required, so it's resolved once and stored in the discovery cache. An empty login must skip the query entirely: `actor=` with no value matches *all* actors, which is silently wrong data.
+- **The environment name and the reviewer list exist only on `pending_deployments`**, never on the runs listing. That endpoint **404s for any run without a pending deployment** (the normal case for a wait-timer hold), so an error there means "not mine", not "failed". `current_user_can_approve` is the whole "is this mine to act on" signal.
+
+Discovery sweeps every non-archived repo in every org from `/user/orgs` and keeps those with a `required_reviewers` environment: 67 repos → 2 hits on this account, ~4 s at 8-way concurrency (~30 s serial, hence the worker pool). Cached an hour under `$XDG_CACHE_HOME` — deliberately *not* `$XDG_RUNTIME_DIR` like the PR cache, since that is cleared on logout and re-running a ~70-call sweep every login is what the cache exists to prevent. A failed sweep serves the stale list and backs off 10 minutes rather than retrying ~70 doomed calls every tick.
+
+A GraphQL variant of the sweep (`Repository.environments.protectionRules`, enum `REQUIRED_REVIEWERS` in screaming case) collapses it to ~3 calls / ~2.5 s and returns the identical answer — worth doing if the org grows, but note `gh api graphql` **exits 1 on partial errors** even with `data` populated, so it must be one query per org to contain the blast radius.
+
+Two rules the render obeys. Runs are garnish on a PR pill, so nothing in the runs path may `continue` the tick the way the PR fetch does — a workflow-API hiccup must never cost the PR counts. And when any watched repo fails to answer, the run segment is dropped from text, tooltip *and* class together: a partial poll must not colour the pill for a state it can't also show a count for. The tradeoff is that "poll failed" and "nothing pending" currently look identical; a `runs-stale` class serving the last complete poll is the obvious upgrade if that bites.
+
+`--swiftbar` skips runs entirely, which also sidesteps a trap: SwiftBar re-execs the binary every 5 minutes as a fresh process, so a run-enabled swiftbar path would need the discovery cache to persist or it would pay the full sweep on every tick.
+
 ## bambu-ctl module details
 
 ### Why cloud, not local

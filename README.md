@@ -98,6 +98,8 @@ Add this to your Waybar configuration file, usually `~/.config/waybar/config`:
 ## waybar-github-pr
 Shows how many of your open GitHub PRs are approved and ready to merge, with a bell variant when there are unread notifications. Authentication piggybacks on the `gh` CLI, so `gh auth login` is the only setup. Clicking runs the binary again with `--open`: one ready PR opens directly via `xdg-open`, several present a `fuzzel` picker first. It also fires `notify-send` when a PR becomes ready, and caches state under `$XDG_RUNTIME_DIR` so the click path doesn't re-query. SwiftBar-enabled.
 
+It also tracks GitHub Actions runs that want your attention: runs stopped at a deployment gate **you** can approve, and runs **you** dispatched that are still going. Each becomes a picker entry linking to the run (approving stays in the browser — a mis-select in a fuzzel list should not deploy to production), and a new gate raises a `notify-send`. The repos to poll are discovered automatically — every non-archived repo in your orgs that has an environment gated on `required_reviewers` — and cached for an hour under `$XDG_CACHE_HOME`; `--watch-runs` adds repos discovery can't find, and `--discover-only` prints the set. `--runs=false` turns the whole thing off.
+
 ## waybar-cpu-temp
 CPU temperature, with a tooltip listing every CPU-related hwmon sensor it found. Sensors are auto-discovered, so there's nothing to configure per machine — `--interval` is the only flag.
 
