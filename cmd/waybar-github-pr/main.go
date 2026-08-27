@@ -67,6 +67,11 @@ func main() {
 	var watchRunsCSV string
 	var runsTTL time.Duration
 	var discoverOnly bool
+	var applyRepo string
+	var applyWorkflow string
+	var applyWindow time.Duration
+	var applyDryRun bool
+	var applyIncludeUnapplied bool
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
@@ -82,6 +87,16 @@ func main() {
 		"How long the discovered set of reviewer-gated repos stays cached before re-scanning")
 	flag.BoolVar(&discoverOnly, "discover-only", false,
 		"Print the discovered reviewer-gated repos and exit")
+	flag.StringVar(&applyRepo, "apply-repo", "",
+		"owner/repo to track terraform roots merged but not yet applied (empty disables)")
+	flag.StringVar(&applyWorkflow, "apply-workflow", "apply.yml",
+		"Dispatch workflow whose `root` choice input enumerates the roots")
+	flag.DurationVar(&applyWindow, "apply-window", 336*time.Hour,
+		"How far back on main to look for unapplied merges")
+	flag.BoolVar(&applyDryRun, "apply-dry-run", false,
+		"Print the roots pending apply, with the reasoning, and exit")
+	flag.BoolVar(&applyIncludeUnapplied, "apply-include-unapplied", false,
+		"Also report roots that have never been applied through the workflow (no baseline, noisy)")
 	flag.Parse()
 
 	if open {
@@ -94,6 +109,29 @@ func main() {
 		if r = strings.TrimSpace(r); r != "" {
 			watchRuns = append(watchRuns, r)
 		}
+	}
+
+	if applyDryRun {
+		if applyRepo == "" {
+			log.Fatal("--apply-dry-run needs --apply-repo")
+		}
+		pending, err := fetchPending(applyRepo, applyWorkflow, applyWindow, applyIncludeUnapplied)
+		if err != nil {
+			log.Fatalf("apply tracking: %s", err)
+		}
+		roots, rerr := fetchRoots(applyRepo, applyWorkflow)
+		if rerr != nil {
+			log.Fatalf("root list: %s", rerr)
+		}
+		fmt.Printf("%d roots parsed from %s\n", len(roots), applyWorkflow)
+		if len(pending) == 0 {
+			fmt.Println("no roots pending apply")
+		}
+		for _, p := range pending {
+			fmt.Printf("%-32s %d commit(s), newest %s (%s)\n",
+				p.Root, p.Commits, p.NewestSHA[:7], p.NewestWhen)
+		}
+		return
 	}
 
 	if discoverOnly {
@@ -147,6 +185,20 @@ func main() {
 			notifyApprovals(approvalRuns, notify)
 		}
 
+		// Roots that landed on main and were never applied. Independent of
+		// the runs poll above: a failure here must not disturb either the PR
+		// counts or the run states.
+		var pending []PendingRoot
+		if applyRepo != "" && !swiftbar {
+			p, err := fetchPending(applyRepo, applyWorkflow, applyWindow, applyIncludeUnapplied)
+			if err != nil {
+				log.Printf("Error tracking unapplied roots: %s", err)
+			} else {
+				pending = p
+				notifyPending(pending, notify)
+			}
+		}
+
 		var tooltips []string
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
@@ -170,7 +222,7 @@ func main() {
 		// filtered count into the pill / tooltip / left-click menu.
 		notifs := processNotifications(notifyReasons, notify)
 		if !swiftbar {
-			writePRCache(all, approved, notifs, runs.Runs)
+			writePRCache(all, approved, notifs, runs.Runs, pending)
 		}
 
 		if swiftbar {
@@ -192,6 +244,9 @@ func main() {
 			if n := len(failedRuns); n > 0 {
 				text += fmt.Sprintf(" 󰀨 %d", n)
 			}
+		}
+		if n := len(pending); n > 0 {
+			text += fmt.Sprintf(" 󰅧 %d", n)
 		}
 
 		if len(notifs) > 0 {
@@ -229,6 +284,15 @@ func main() {
 			}
 		}
 
+		if len(pending) > 0 {
+			tooltips = append(tooltips, "")
+			tooltips = append(tooltips, "<b>Needs terraform apply</b>")
+			for _, p := range pending {
+				tooltips = append(tooltips, fmt.Sprintf("  󰅧 %s · %d commit(s)",
+					pangoEscape(trimRunes(p.Root, 60)), p.Commits))
+			}
+		}
+
 		w := waybar.New()
 		w.Text = text
 		w.ToolTip = strings.Join(tooltips, "\n")
@@ -239,6 +303,9 @@ func main() {
 		// are: an incomplete poll must not colour the pill for a state it
 		// cannot also show a count for.
 		classes := []string{status}
+		if len(pending) > 0 {
+			classes = append(classes, "pending")
+		}
 		if runs.Complete {
 			if len(runningRuns) > 0 {
 				classes = append(classes, "running")
@@ -443,10 +510,13 @@ type PRCache struct {
 	Approved      []PR           `json:"approved"`
 	Notifications []Notification `json:"notifications,omitempty"`
 	Runs          []Run          `json:"runs,omitempty"`
+	Pending       []PendingRoot  `json:"pending,omitempty"`
 }
 
-func writePRCache(all, approved []PR, notifs []Notification, runs []Run) {
-	data, err := json.Marshal(PRCache{All: all, Approved: approved, Notifications: notifs, Runs: runs})
+func writePRCache(all, approved []PR, notifs []Notification, runs []Run, pending []PendingRoot) {
+	data, err := json.Marshal(PRCache{
+		All: all, Approved: approved, Notifications: notifs, Runs: runs, Pending: pending,
+	})
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
 		return
@@ -492,6 +562,9 @@ func openPRs() {
 		// Non-zero for a failed run: opening it is also how you acknowledge
 		// it, which is what stops the daemon resurfacing it next tick.
 		dismiss int64
+		// Set for a root pending apply. Selecting it starts the workflow
+		// rather than opening a page, so it is a side effect, not a link.
+		dispatch *PendingRoot
 	}
 	var items []item
 	for _, pr := range cache.All {
@@ -529,6 +602,15 @@ func openPRs() {
 		})
 	}
 
+	for i := range cache.Pending {
+		p := cache.Pending[i]
+		items = append(items, item{
+			label:    fmt.Sprintf("󰅧 [%s] %s · needs apply (%d commit(s))", p.Repo, p.Root, p.Commits),
+			url:      p.CompareURL,
+			dispatch: &p,
+		})
+	}
+
 	for _, n := range cache.Notifications {
 		items = append(items, item{
 			label: fmt.Sprintf("󰂜 [%s] [%s] %s", n.Reason, n.Repository.FullName, n.Subject.Title),
@@ -539,7 +621,11 @@ func openPRs() {
 	if len(items) == 0 {
 		return
 	}
-	if len(items) == 1 {
+	// The single-item shortcut skips the menu entirely, which is fine for a
+	// link but not for an entry that starts a terraform run — one click on the
+	// pill would dispatch against prod with nothing shown. Only take the
+	// shortcut when the lone item is inert.
+	if len(items) == 1 && items[0].dispatch == nil {
 		openItem(items[0].url, items[0].dismiss)
 		return
 	}
@@ -559,6 +645,10 @@ func openPRs() {
 	selected := strings.TrimSpace(string(out))
 	for _, it := range items {
 		if it.label == selected {
+			if it.dispatch != nil {
+				dispatchApply(*it.dispatch)
+				return
+			}
 			openItem(it.url, it.dismiss)
 			return
 		}

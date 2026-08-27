@@ -452,14 +452,7 @@ func notifyApprovals(approval []Run, enabled bool) {
 		if r.Environment != "" {
 			body += " · " + r.Environment
 		}
-		cmd := exec.Command("notify-send",
-			"--app-name", "GitHub",
-			"--icon", "github",
-			"--category", "im.received",
-			"Deployment approval needed", body)
-		if err := cmd.Run(); err != nil {
-			log.Printf("Error sending approval notification: %s", err)
-		}
+		notifySend("Deployment approval needed", body)
 	}
 
 	// Keep the map from growing without bound over a long-lived daemon.
@@ -540,5 +533,25 @@ func dismissRun(id int64) {
 	}
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		log.Printf("Error writing dismissals: %s", err)
+	}
+}
+
+// ghCommand builds a plain `gh` invocation for the non-api subcommands.
+// Unlike ghJSON this carries no timeout: its only caller is the short-lived
+// --open process, where a hung gh blocks nothing but itself.
+func ghCommand(args ...string) *exec.Cmd {
+	return exec.Command("gh", args...)
+}
+
+// notifySend is the one place this module talks to the notification daemon,
+// so every notification it raises is grouped under the same app and icon.
+func notifySend(title, body string) {
+	cmd := exec.Command("notify-send",
+		"--app-name", "GitHub",
+		"--icon", "github",
+		"--category", "im.received",
+		title, body)
+	if err := cmd.Run(); err != nil {
+		log.Printf("Error sending notification %q: %s", title, err)
 	}
 }
