@@ -272,43 +272,77 @@ type mainCommit struct {
 	} `json:"commit"`
 }
 
-// lastApplied maps root -> head_sha of its most recent successful apply.
+type applyRunList struct {
+	WorkflowRuns []struct {
+		DisplayTitle string `json:"display_title"`
+		HeadSHA      string `json:"head_sha"`
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+	} `json:"workflow_runs"`
+}
+
+// inFlightStatus covers every state an apply can be in before it has
+// finished. "pending" is the one that is easy to miss: it is what GitHub
+// reports for a run held behind apply.yml's `concurrency: tf-apply-<root>`
+// group, i.e. a second dispatch queued behind the first.
+func inFlightStatus(s string) bool {
+	switch s {
+	case "queued", "in_progress", "waiting", "pending", "requested", "action_required":
+		return true
+	}
+	return false
+}
+
+// applyState returns, per root, the head_sha of its most recent successful
+// apply and whether an apply for it is currently in flight.
 //
 // The root is recovered from the run's display_title, which comes from
 // apply.yml's `run-name: "terraform apply ${{ inputs.root }} (@${{ github.actor }})"`.
 // If that line ever changes upstream, this stops matching and roots simply
 // look never-applied — over-reporting, which is the safe direction.
-func lastApplied(repo, workflow string, roots []string) (map[string]string, error) {
-	var resp struct {
-		WorkflowRuns []struct {
-			DisplayTitle string `json:"display_title"`
-			HeadSHA      string `json:"head_sha"`
-			Conclusion   string `json:"conclusion"`
-		} `json:"workflow_runs"`
-	}
-	path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?status=success&per_page=100", repo, workflow)
-	if err := ghJSON(&resp, path); err != nil {
-		return nil, err
-	}
-
+//
+// Two calls rather than one: filtering to successes keeps the 100-run window
+// full of the history the cut point needs, while in-flight runs are by
+// definition recent, so a short unfiltered page finds them all.
+func applyState(repo, workflow string, roots []string) (map[string]string, map[string]bool, error) {
 	known := make(map[string]bool, len(roots))
 	for _, r := range roots {
 		known[r] = true
 	}
 
+	var success applyRunList
+	path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?status=success&per_page=100", repo, workflow)
+	if err := ghJSON(&success, path); err != nil {
+		return nil, nil, err
+	}
 	// Runs come back newest first, so the first hit per root wins.
-	out := make(map[string]string)
-	for _, r := range resp.WorkflowRuns {
+	last := make(map[string]string)
+	for _, r := range success.WorkflowRuns {
 		if r.Conclusion != "success" {
 			continue
 		}
 		root := parseRunRoot(r.DisplayTitle)
-		if root == "" || !known[root] || out[root] != "" {
+		if root == "" || !known[root] || last[root] != "" {
 			continue
 		}
-		out[root] = r.HeadSHA
+		last[root] = r.HeadSHA
 	}
-	return out, nil
+
+	var recent applyRunList
+	path = fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?per_page=30", repo, workflow)
+	if err := ghJSON(&recent, path); err != nil {
+		return nil, nil, err
+	}
+	busy := make(map[string]bool)
+	for _, r := range recent.WorkflowRuns {
+		if !inFlightStatus(r.Status) {
+			continue
+		}
+		if root := parseRunRoot(r.DisplayTitle); root != "" && known[root] {
+			busy[root] = true
+		}
+	}
+	return last, busy, nil
 }
 
 // parseRunRoot pulls the root out of "terraform apply <root> (@<actor>)".
@@ -344,7 +378,7 @@ func fetchPending(repo, workflow string, window time.Duration, includeUnapplied 
 		return nil, nil
 	}
 
-	applied, err := lastApplied(repo, workflow, roots)
+	applied, inFlight, err := applyState(repo, workflow, roots)
 	if err != nil {
 		return nil, fmt.Errorf("apply history: %w", err)
 	}
@@ -396,6 +430,14 @@ func fetchPending(repo, workflow string, window time.Duration, includeUnapplied 
 			// after the CI migration that was 37 of 39 roots, every one of
 			// them pointing at the migration commit itself.
 			if !includeUnapplied && applied[root] == "" {
+				continue
+			}
+			// An apply for this root is already dispatched and waiting on
+			// its gate. Still listing it as "needs apply" is not just noise:
+			// the entry dispatches on click, and apply.yml's per-root
+			// concurrency group queues rather than cancels, so acting on it
+			// silently stacks a duplicate run behind the first.
+			if inFlight[root] {
 				continue
 			}
 			a := hits[root]

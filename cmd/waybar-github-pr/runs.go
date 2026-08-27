@@ -355,7 +355,7 @@ func fetchRuns(repos []string, login string) runsResult {
 		}
 		for _, r := range mine.WorkflowRuns {
 			switch {
-			case r.Status == "queued" || r.Status == "in_progress":
+			case r.Status == "queued" || r.Status == "in_progress" || r.Status == "pending":
 				r.Repo = repo
 				res.Runs = append(res.Runs, r)
 			case r.Status == "completed" && failedConclusion(r.Conclusion):
