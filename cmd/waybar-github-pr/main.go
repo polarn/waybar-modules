@@ -567,11 +567,17 @@ func openPRs() {
 		dispatch *PendingRoot
 	}
 	var items []item
+	// A notification about your own PR names a PR that is already in the
+	// open-PR list, so the two queries overlap and the same thing was being
+	// offered twice. Index the PR entries by URL so such a notification can
+	// annotate the existing row instead of adding a duplicate one.
+	byURL := make(map[string]int, len(cache.All))
 	for _, pr := range cache.All {
 		prefix := "○"
 		if isApproved(pr, cache.Approved) {
 			prefix = "✓"
 		}
+		byURL[pr.URL] = len(items)
 		items = append(items, item{
 			label: fmt.Sprintf("%s [%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title),
 			url:   pr.URL,
@@ -612,9 +618,16 @@ func openPRs() {
 	}
 
 	for _, n := range cache.Notifications {
+		url := subjectWebURL(n)
+		if i, ok := byURL[url]; ok {
+			// Same PR: carry the reason onto the row that is already there.
+			// Dropping the notification outright would lose why it fired.
+			items[i].label += " 󰂜 " + n.Reason
+			continue
+		}
 		items = append(items, item{
 			label: fmt.Sprintf("󰂜 [%s] [%s] %s", n.Reason, n.Repository.FullName, n.Subject.Title),
-			url:   subjectWebURL(n),
+			url:   url,
 		})
 	}
 
