@@ -207,10 +207,8 @@ func main() {
 			if isApproved(pr, approved) {
 				prefix = "✓ "
 			}
-			line := fmt.Sprintf("%s[%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title)
-			if len(line) > 70 {
-				line = line[:67] + "..."
-			}
+			line := fmt.Sprintf("%s[%s] %s", prefix,
+				pangoEscape(pr.Repository.NameWithOwner), pangoEscape(trimRunes(pr.Title, 60)))
 			tooltips = append(tooltips, line)
 		}
 
