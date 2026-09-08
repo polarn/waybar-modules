@@ -26,6 +26,8 @@ type Run struct {
 	Status       string `json:"status"`     // queued | in_progress | waiting | completed
 	Conclusion   string `json:"conclusion"` // null while running; failure/success/... when completed
 	UpdatedAt    string `json:"updated_at"`
+	CreatedAt    string `json:"created_at"`
+	RunStartedAt string `json:"run_started_at"`
 	HTMLURL      string `json:"html_url"`
 
 	Repo        string `json:"repo"`        // owner/name; filled in by us
@@ -41,6 +43,20 @@ func (r Run) Title() string {
 		return r.DisplayTitle
 	}
 	return r.Name
+}
+
+// When reports the moment the picker's age column should measure from: for a
+// failure that is when it ended, for anything still going it is when it
+// started. Dating a failure from run_started_at would age the attempt rather
+// than the breakage, which is the thing you want to know is going stale.
+func (r Run) When() time.Time {
+	if r.Failed {
+		return parseGHTime(r.UpdatedAt)
+	}
+	if t := parseGHTime(r.RunStartedAt); !t.IsZero() {
+		return t
+	}
+	return parseGHTime(r.CreatedAt)
 }
 
 // Tracks run IDs we've already notify-send'd an approval request for. Same

@@ -17,6 +17,7 @@ import (
 type PR struct {
 	Title      string     `json:"title"`
 	URL        string     `json:"url"`
+	CreatedAt  string     `json:"createdAt"`
 	Repository Repository `json:"repository"`
 }
 
@@ -469,7 +470,7 @@ func fetchPRs(review string) ([]PR, error) {
 	args := []string{"search", "prs",
 		"--state=open",
 		"--author=@me",
-		"--json=title,url,repository",
+		"--json=title,url,repository,createdAt",
 	}
 	if review != "" {
 		args = append(args, "--review="+review)
@@ -540,9 +541,81 @@ func subjectWebURL(n Notification) string {
 	return "https://github.com/" + s
 }
 
+// pickerWidth is the fuzzel window width, in characters. Wide enough for the
+// longest shape a row takes — glyph, age, `[owner/repo]` and a title — so
+// what gets ellipsized is the tail of a title rather than the part that says
+// which repo the row belongs to.
+const pickerWidth = 120
+
+type item struct {
+	label string
+	url   string
+	// Non-zero for a failed run: opening it is also how you acknowledge
+	// it, which is what stops the daemon resurfacing it next tick.
+	dismiss int64
+	// Set for a root pending apply. Selecting it starts the workflow
+	// rather than opening a page, so it is a side effect, not a link.
+	dispatch *PendingRoot
+	// A labelled rule introducing a group. dmenu has no notion of an inert
+	// line, so selecting one re-opens the picker instead of acting.
+	divider bool
+}
+
+// section is one group of rows. title labels the divider drawn above the
+// group, which is only rendered when a second group exists to separate it
+// from.
+type section struct {
+	title string
+	items []item
+}
+
+// row lays an entry out as glyph, a right-aligned age column, then the text.
+// The age goes before the text, not after it, because an age on the far side
+// of a long title is the first thing fuzzel ellipsizes away — which would
+// lose exactly the context the column exists to add.
+func row(glyph string, when time.Time, text string) string {
+	return fmt.Sprintf("%s %4s  %s", glyph, humanAge(when), text)
+}
+
+// rowTextWidth is what a row has left for its text once row() has spent the
+// leading glyph, the age column and the gutter. It stops short of pickerWidth
+// because fuzzel's width counts characters and excludes the window's own
+// padding, so drawing to the full width would truncate.
+const rowTextWidth = pickerWidth - 8
+
+// fitText composes a row's text as head + an elastic middle + suffix, cutting
+// the middle when the row would overflow. The suffix is where a row's state
+// lives — a merge-queue position, a refusal reason, a needs-approval
+// environment — and the middle is a title, so the title is what gives way.
+// Letting fuzzel ellipsize the right-hand end instead would drop precisely
+// the part that makes the row worth reading.
+func fitText(head, middle, suffix string) string {
+	room := rowTextWidth - len([]rune(head)) - len([]rune(suffix))
+	if room < 12 {
+		room = 12 // a suffix long enough to squeeze the title out entirely
+	}
+	return head + trimRunes(middle, room) + suffix
+}
+
+// divider draws the rule that introduces a group, to a fixed length so the
+// rules line up with each other.
+func divider(title string) string {
+	const (
+		lead   = 4
+		budget = rowTextWidth
+	)
+	title = trimRunes(title, budget-2*lead-2)
+	tail := budget - lead - 2 - len([]rune(title))
+	if tail < lead {
+		tail = lead
+	}
+	return fmt.Sprintf("%s %s %s",
+		strings.Repeat("─", lead), title, strings.Repeat("─", tail))
+}
+
 // openPRs opens a fuzzel picker that merges the cached open PRs with any
-// unread notifications. Selecting an entry opens the relevant URL in the
-// default browser.
+// unread notifications, workflow runs and roots pending apply. Selecting an
+// entry opens the relevant URL in the default browser.
 func openPRs() {
 	data, err := os.ReadFile(cacheFilePath())
 	if err != nil {
@@ -556,33 +629,79 @@ func openPRs() {
 		return
 	}
 
-	type item struct {
-		label string
-		url   string
-		// Non-zero for a failed run: opening it is also how you acknowledge
-		// it, which is what stops the daemon resurfacing it next tick.
-		dismiss int64
-		// Set for a root pending apply. Selecting it starts the workflow
-		// rather than opening a page, so it is a side effect, not a link.
-		dispatch *PendingRoot
+	items := pickerItems(cache)
+	if len(items) == 0 {
+		return
 	}
-	var items []item
+
+	// The single-item shortcut skips the menu entirely, which is fine for a
+	// link but not for an entry that starts a terraform run — one click on the
+	// pill would dispatch against prod with nothing shown. Only take the
+	// shortcut when the lone item is inert. A one-item list never carries a
+	// divider, so this cannot fire on one.
+	if len(items) == 1 && items[0].dispatch == nil {
+		openItem(items[0].url, items[0].dismiss)
+		return
+	}
+
+	for {
+		it, ok := pick(items)
+		if !ok {
+			return // cancelled, or typed something that matched nothing
+		}
+		if it.divider {
+			continue
+		}
+		if it.dispatch != nil {
+			dispatchApply(*it.dispatch)
+			return
+		}
+		openItem(it.url, it.dismiss)
+		return
+	}
+}
+
+// pickerItems turns one poll's cache into the rows the picker offers, in the
+// order they appear: open PRs, workflow runs, roots pending apply, then
+// notifications, each group after the first introduced by a divider.
+func pickerItems(cache PRCache) []item {
 	// A notification about your own PR names a PR that is already in the
-	// open-PR list, so the two queries overlap and the same thing was being
-	// offered twice. Index the PR entries by URL so such a notification can
-	// annotate the existing row instead of adding a duplicate one.
-	byURL := make(map[string]int, len(cache.All))
+	// open-PR list, so the two queries overlap and the same thing would be
+	// offered twice. Fold those reasons into the PR's own row and keep only
+	// the rest as rows of their own.
+	//
+	// Resolved before the PR rows are built rather than patched onto them
+	// afterwards, so a reason is part of the suffix each row is sized around
+	// instead of a tail hung past the window's edge.
+	mine := make(map[string]bool, len(cache.All))
+	for _, pr := range cache.All {
+		mine[pr.URL] = true
+	}
+	reasons := make(map[string]string)
+	var loose []Notification
+	for _, n := range cache.Notifications {
+		if url := subjectWebURL(n); mine[url] {
+			reasons[url] += " 󰂜 " + n.Reason
+			continue
+		}
+		loose = append(loose, n)
+	}
+
+	prs := section{title: "Pull requests"}
 	for _, pr := range cache.All {
 		prefix := "○"
 		if isApproved(pr, cache.Approved) {
 			prefix = "✓"
 		}
-		byURL[pr.URL] = len(items)
-		items = append(items, item{
-			label: fmt.Sprintf("%s [%s] %s", prefix, pr.Repository.NameWithOwner, pr.Title),
-			url:   pr.URL,
+		suffix := reasons[pr.URL]
+		prs.items = append(prs.items, item{
+			label: row(prefix, parseGHTime(pr.CreatedAt),
+				fitText(fmt.Sprintf("[%s] ", pr.Repository.NameWithOwner), pr.Title, suffix)),
+			url: pr.URL,
 		})
 	}
+
+	runs := section{title: "Workflow runs"}
 	for _, r := range cache.Runs {
 		// The run ID keeps labels unique: the picker matches the fuzzel
 		// selection back by exact label equality, so two runs of the same
@@ -601,71 +720,80 @@ func openPRs() {
 			suffix = " · " + r.Conclusion
 			dismiss = r.ID
 		}
-		items = append(items, item{
-			label:   fmt.Sprintf("%s [%s] %s%s #%d", prefix, r.Repo, r.Title(), suffix, r.ID),
+		runs.items = append(runs.items, item{
+			label: row(prefix, r.When(), fitText(fmt.Sprintf("[%s] ", r.Repo),
+				r.Title(), suffix+fmt.Sprintf(" #%d", r.ID))),
 			url:     r.HTMLURL,
 			dismiss: dismiss,
 		})
 	}
 
+	applies := section{title: "Needs terraform apply"}
 	for i := range cache.Pending {
 		p := cache.Pending[i]
-		items = append(items, item{
-			label:    fmt.Sprintf("󰅧 [%s] %s · needs apply (%d commit(s))", p.Repo, p.Root, p.Commits),
+		applies.items = append(applies.items, item{
+			label: row("󰅧", parseGHTime(p.NewestWhen),
+				fitText(fmt.Sprintf("[%s] ", p.Repo), p.Root,
+					fmt.Sprintf(" · needs apply (%d commit(s))", p.Commits))),
 			url:      p.CompareURL,
 			dispatch: &p,
 		})
 	}
 
-	for _, n := range cache.Notifications {
-		url := subjectWebURL(n)
-		if i, ok := byURL[url]; ok {
-			// Same PR: carry the reason onto the row that is already there.
-			// Dropping the notification outright would lose why it fired.
-			items[i].label += " 󰂜 " + n.Reason
-			continue
-		}
-		items = append(items, item{
-			label: fmt.Sprintf("󰂜 [%s] [%s] %s", n.Reason, n.Repository.FullName, n.Subject.Title),
-			url:   url,
+	notifs := section{title: "Notifications"}
+	for _, n := range loose {
+		notifs.items = append(notifs.items, item{
+			label: row("󰂜", parseGHTime(n.UpdatedAt),
+				fitText(fmt.Sprintf("[%s] [%s] ", n.Reason, n.Repository.FullName),
+					n.Subject.Title, "")),
+			url: subjectWebURL(n),
 		})
 	}
 
-	if len(items) == 0 {
-		return
-	}
-	// The single-item shortcut skips the menu entirely, which is fine for a
-	// link but not for an entry that starts a terraform run — one click on the
-	// pill would dispatch against prod with nothing shown. Only take the
-	// shortcut when the lone item is inert.
-	if len(items) == 1 && items[0].dispatch == nil {
-		openItem(items[0].url, items[0].dismiss)
-		return
+	var populated []section
+	for _, s := range []section{prs, runs, applies, notifs} {
+		if len(s.items) > 0 {
+			populated = append(populated, s)
+		}
 	}
 
-	var entries []string
+	var items []item
+	for i, s := range populated {
+		// No divider above the first group: it separates nothing, and it
+		// would sit under the cursor fuzzel opens with, so Enter on the
+		// default selection would do nothing at all.
+		if i > 0 {
+			items = append(items, item{label: divider(s.title), divider: true})
+		}
+		items = append(items, s.items...)
+	}
+	return items
+}
+
+// pick shows the menu and resolves the selection back to its item. fuzzel
+// dmenu hands back the chosen line verbatim, so labels are matched by
+// equality — which is why every one of them is made unique.
+func pick(items []item) (item, bool) {
+	entries := make([]string, 0, len(items))
 	for _, it := range items {
 		entries = append(entries, it.label)
 	}
 
-	cmd := exec.Command("fuzzel", "--dmenu", "--width=75", "--prompt", "GitHub > ")
+	cmd := exec.Command("fuzzel", "--dmenu",
+		fmt.Sprintf("--width=%d", pickerWidth), "--prompt", "GitHub > ")
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {
-		return // user cancelled
+		return item{}, false // user cancelled
 	}
 
 	selected := strings.TrimSpace(string(out))
 	for _, it := range items {
 		if it.label == selected {
-			if it.dispatch != nil {
-				dispatchApply(*it.dispatch)
-				return
-			}
-			openItem(it.url, it.dismiss)
-			return
+			return it, true
 		}
 	}
+	return item{}, false
 }
 
 // openItem hands a URL to the browser and, for a failed run, records the
@@ -676,6 +804,39 @@ func openItem(url string, dismiss int64) {
 		dismissRun(dismiss)
 	}
 	exec.Command("xdg-open", url).Start()
+}
+
+// parseGHTime parses one of the RFC3339 timestamps GitHub returns, yielding
+// the zero time for anything it cannot read. An age is decoration, so a
+// timestamp in a surprising shape must cost the decoration, not the row.
+func parseGHTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// humanAge renders an age as a single coarse unit — minutes below an hour,
+// hours below a day, days above — so it always fits the fixed-width column
+// the picker aligns on. Empty for an unknown time, which pads to blank.
+func humanAge(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	switch d := time.Since(t); {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 // trimRunes shortens s to at most n runes, appending an ellipsis when it had
