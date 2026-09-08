@@ -19,6 +19,11 @@ type PR struct {
 	URL        string     `json:"url"`
 	CreatedAt  string     `json:"createdAt"`
 	Repository Repository `json:"repository"`
+
+	// Merge-queue state, resolved separately and joined on by URL — the PR
+	// search cannot report it. Nil when the PR is neither queued nor
+	// recently refused, which is the common case.
+	Queue *QueueState `json:"queue,omitempty"`
 }
 
 type Repository struct {
@@ -65,6 +70,7 @@ func main() {
 	var swiftbar bool
 	var notifyReasonsCSV string
 	var runsEnabled bool
+	var queueEnabled bool
 	var watchRunsCSV string
 	var runsTTL time.Duration
 	var discoverOnly bool
@@ -73,6 +79,7 @@ func main() {
 	var applyWindow time.Duration
 	var applyDryRun bool
 	var applyIncludeUnapplied bool
+	var queueDryRun bool
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
@@ -82,6 +89,8 @@ func main() {
 		"Comma-separated reasons that should produce notify-send + count toward the pill")
 	flag.BoolVar(&runsEnabled, "runs", true,
 		"Track GitHub Actions runs that need attention (waiting on my approval, or dispatched by me and still going)")
+	flag.BoolVar(&queueEnabled, "merge-queue", true,
+		"Track whether my PRs are sitting in a merge queue, or were refused by one")
 	flag.StringVar(&watchRunsCSV, "watch-runs", "",
 		"Extra owner/repo entries to poll for runs, comma-separated — unioned with the auto-discovered set")
 	flag.DurationVar(&runsTTL, "runs-ttl", time.Hour,
@@ -96,6 +105,8 @@ func main() {
 		"How far back on main to look for unapplied merges")
 	flag.BoolVar(&applyDryRun, "apply-dry-run", false,
 		"Print the roots pending apply, with the reasoning, and exit")
+	flag.BoolVar(&queueDryRun, "queue-dry-run", false,
+		"Print the merge-queue state of my open PRs and exit")
 	flag.BoolVar(&applyIncludeUnapplied, "apply-include-unapplied", false,
 		"Also report roots that have never been applied through the workflow (no baseline, noisy)")
 	flag.Parse()
@@ -131,6 +142,24 @@ func main() {
 		for _, p := range pending {
 			fmt.Printf("%-32s %d commit(s), newest %s (%s)\n",
 				p.Root, p.Commits, p.NewestSHA[:7], p.NewestWhen)
+		}
+		return
+	}
+
+	if queueDryRun {
+		q := fetchQueueStates()
+		if !q.Complete {
+			log.Fatal("merge queue query failed; see the error above")
+		}
+		if len(q.States) == 0 {
+			fmt.Println("no open PRs")
+		}
+		for url, s := range q.States {
+			summary := s.Summary()
+			if summary == "" {
+				summary = "not queued"
+			}
+			fmt.Printf("%-60s %s\n", url, summary)
 		}
 		return
 	}
@@ -200,6 +229,18 @@ func main() {
 			}
 		}
 
+		// Merge-queue state for my own PRs. Independent of everything above
+		// for the same reason the runs poll is: a failure here must not
+		// disturb the PR counts.
+		var queue queueResult
+		var inQueue, refused int
+		if queueEnabled && !swiftbar {
+			queue = fetchQueueStates()
+			annotateQueue(all, queue)
+			inQueue, refused = splitQueue(all)
+			notifyRejections(all, notify)
+		}
+
 		var tooltips []string
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
@@ -209,6 +250,9 @@ func main() {
 			}
 			line := fmt.Sprintf("%s[%s] %s", prefix,
 				pangoEscape(pr.Repository.NameWithOwner), pangoEscape(trimRunes(pr.Title, 60)))
+			if pr.Queue != nil {
+				line += " · " + pangoEscape(pr.Queue.Summary())
+			}
 			tooltips = append(tooltips, line)
 		}
 
@@ -230,6 +274,14 @@ func main() {
 		}
 
 		text := fmt.Sprintf("%d·%d", len(approved), len(all))
+		if queue.Complete {
+			if inQueue > 0 {
+				text += fmt.Sprintf(" %s %d", glyphQueue, inQueue)
+			}
+			if refused > 0 {
+				text += fmt.Sprintf(" %s %d", glyphDequeued, refused)
+			}
+		}
 		if len(notifs) > 0 {
 			text += fmt.Sprintf(" 󰂜 %d", len(notifs))
 		}
@@ -302,6 +354,14 @@ func main() {
 		// are: an incomplete poll must not colour the pill for a state it
 		// cannot also show a count for.
 		classes := []string{status}
+		if queue.Complete {
+			if inQueue > 0 {
+				classes = append(classes, "queued")
+			}
+			if refused > 0 {
+				classes = append(classes, "dequeued")
+			}
+		}
 		if len(pending) > 0 {
 			classes = append(classes, "pending")
 		}
@@ -691,7 +751,11 @@ func pickerItems(cache PRCache) []item {
 		if isApproved(pr, cache.Approved) {
 			prefix = "✓"
 		}
-		suffix := reasons[pr.URL]
+		suffix := ""
+		if pr.Queue != nil {
+			suffix = " · " + pr.Queue.Summary()
+		}
+		suffix += reasons[pr.URL]
 		prs.items = append(prs.items, item{
 			label: row(prefix, parseGHTime(pr.CreatedAt),
 				fitText(fmt.Sprintf("[%s] ", pr.Repository.NameWithOwner), pr.Title, suffix)),
