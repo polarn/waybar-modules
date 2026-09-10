@@ -105,17 +105,24 @@ func dequeueRejection(reason string) bool {
 	return true
 }
 
-// queueResult carries a tick's worth of merge-queue state. Complete is false
-// when the query failed or came back partial, in which case the caller omits
-// the queue segments entirely — the same rule the runs poll follows, for the
-// same reason: an absent value must not become a confident zero.
-type queueResult struct {
-	States   map[string]QueueState
+// prFacts carries what one GraphQL call resolves about my open PRs: the
+// things `gh search prs` cannot answer, keyed by PR URL. Complete is false
+// when the query failed or came back partial, in which case the caller
+// leaves the PRs un-annotated and omits the queue segments — the same rule
+// the runs poll follows, for the same reason: an absent value must not
+// become a confident zero.
+type prFacts struct {
+	Queue map[string]QueueState
+	// Base branch, set only when it is not the repository's default. A
+	// backport onto v10.2 needs saying; a PR onto main does not, and
+	// labelling every row with it would be noise.
+	Base     map[string]string
 	Complete bool
 }
 
-// queueQuery asks, in one request, for every open PR of mine: whether it sits
-// in a merge queue and where, plus its most recent removal from one.
+// factsQuery asks, in one request, for every open PR of mine: whether it sits
+// in a merge queue and where, its most recent removal from one, and the base
+// branch it targets.
 //
 // Reading the removal event rather than diffing successive polls is what lets
 // a refusal survive a daemon restart — `make install` kills this process, and
@@ -124,12 +131,14 @@ type queueResult struct {
 // `gh search prs` cannot answer any of it: its --json field set has no
 // merge-queue member, hence GraphQL. first: 50 is well clear of the handful
 // of PRs one person has open, and matches the search fetchPRs runs.
-const queueQuery = `
+const factsQuery = `
 {
   search(query: "is:open is:pr author:@me", type: ISSUE, first: 50) {
     nodes {
       ... on PullRequest {
         url
+        baseRefName
+        repository { defaultBranchRef { name } }
         isInMergeQueue
         mergeQueueEntry {
           state
@@ -145,15 +154,21 @@ const queueQuery = `
   }
 }`
 
-// fetchQueueStates resolves the merge-queue state of my open PRs, keyed by
-// PR URL so the caller can join it onto the list `gh search prs` returned.
-func fetchQueueStates() queueResult {
+// fetchPRFacts resolves the facts the PR search cannot report, keyed by PR
+// URL so the caller can join them onto the list `gh search prs` returned.
+func fetchPRFacts() prFacts {
 	var resp struct {
 		Data struct {
 			Search struct {
 				Nodes []struct {
-					URL             string `json:"url"`
-					IsInMergeQueue  bool   `json:"isInMergeQueue"`
+					URL         string `json:"url"`
+					BaseRefName string `json:"baseRefName"`
+					Repository  struct {
+						DefaultBranchRef *struct {
+							Name string `json:"name"`
+						} `json:"defaultBranchRef"`
+					} `json:"repository"`
+					IsInMergeQueue  bool `json:"isInMergeQueue"`
 					MergeQueueEntry *struct {
 						State      string `json:"state"`
 						Position   int    `json:"position"`
@@ -178,22 +193,36 @@ func fetchQueueStates() queueResult {
 		} `json:"errors"`
 	}
 
-	if err := ghJSON(&resp, "graphql", "-f", "query="+queueQuery); err != nil {
-		log.Printf("Error fetching merge queue state: %s", err)
-		return queueResult{}
+	if err := ghJSON(&resp, "graphql", "-f", "query="+factsQuery); err != nil {
+		log.Printf("Error fetching PR facts: %s", err)
+		return prFacts{}
 	}
 	// GraphQL answers 200 with a partial result and an errors array, so a
 	// clean exit status is not proof the answer is whole.
 	if len(resp.Errors) > 0 {
-		log.Printf("Merge queue query returned errors: %s", resp.Errors[0].Message)
-		return queueResult{}
+		log.Printf("PR facts query returned errors: %s", resp.Errors[0].Message)
+		return prFacts{}
 	}
 
-	states := make(map[string]QueueState, len(resp.Data.Search.Nodes))
+	out := prFacts{
+		Queue:    make(map[string]QueueState, len(resp.Data.Search.Nodes)),
+		Base:     make(map[string]string),
+		Complete: true,
+	}
 	for _, n := range resp.Data.Search.Nodes {
 		if n.URL == "" {
 			continue // a search hit that was not a PullRequest
 		}
+		// A missing defaultBranchRef means an empty repository, so there is
+		// nothing to call default and the base is worth showing.
+		def := ""
+		if d := n.Repository.DefaultBranchRef; d != nil {
+			def = d.Name
+		}
+		if n.BaseRefName != "" && n.BaseRefName != def {
+			out.Base[n.URL] = n.BaseRefName
+		}
+
 		q := QueueState{InQueue: n.IsInMergeQueue}
 		if e := n.MergeQueueEntry; e != nil {
 			q.State, q.Position, q.EnqueuedAt = e.State, e.Position, e.EnqueuedAt
@@ -206,21 +235,22 @@ func fetchQueueStates() queueResult {
 				q.RejectedReason, q.RejectedAt = ev.Reason, ev.CreatedAt
 			}
 		}
-		states[n.URL] = q
+		out.Queue[n.URL] = q
 	}
-	return queueResult{States: states, Complete: true}
+	return out
 }
 
-// annotateQueue attaches the queue state to the PRs it belongs to. The join
+// annotatePRs attaches the resolved facts to the PRs they belong to. The join
 // is by URL because the two fetches are independent — `gh search prs` gives
-// the list, GraphQL the queue state — so a PR missing from either simply goes
+// the list, GraphQL the rest — so a PR missing from either simply goes
 // un-annotated rather than blocking the tick.
-func annotateQueue(prs []PR, q queueResult) {
-	if !q.Complete {
+func annotatePRs(prs []PR, f prFacts) {
+	if !f.Complete {
 		return
 	}
 	for i := range prs {
-		if s, ok := q.States[prs[i].URL]; ok && (s.InQueue || s.Rejected()) {
+		prs[i].Base = f.Base[prs[i].URL]
+		if s, ok := f.Queue[prs[i].URL]; ok && (s.InQueue || s.Rejected()) {
 			prs[i].Queue = &s
 		}
 	}

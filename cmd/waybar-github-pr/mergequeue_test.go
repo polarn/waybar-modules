@@ -86,8 +86,8 @@ func TestQueueStateSummary(t *testing.T) {
 // annotation would contradict it.
 func TestAnnotateQueueIgnoresIncomplete(t *testing.T) {
 	prs := []PR{{URL: "u1"}}
-	annotateQueue(prs, queueResult{
-		States:   map[string]QueueState{"u1": {InQueue: true, Position: 1}},
+	annotatePRs(prs, prFacts{
+		Queue:    map[string]QueueState{"u1": {InQueue: true, Position: 1}},
 		Complete: false,
 	})
 	if prs[0].Queue != nil {
@@ -97,7 +97,7 @@ func TestAnnotateQueueIgnoresIncomplete(t *testing.T) {
 
 func TestAnnotateQueueAndSplit(t *testing.T) {
 	prs := []PR{{URL: "queued"}, {URL: "refused"}, {URL: "quiet"}, {URL: "absent"}}
-	annotateQueue(prs, queueResult{Complete: true, States: map[string]QueueState{
+	annotatePRs(prs, prFacts{Complete: true, Queue: map[string]QueueState{
 		"queued":  {InQueue: true, Position: 1, Total: 2, State: "QUEUED"},
 		"refused": {RejectedReason: "failed_checks", RejectedAt: time.Now().Format(time.RFC3339)},
 		// Neither queued nor refused: no annotation, so the row stays as

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,12 +18,15 @@ import (
 type PR struct {
 	Title      string     `json:"title"`
 	URL        string     `json:"url"`
+	Number     int        `json:"number"`
 	CreatedAt  string     `json:"createdAt"`
 	Repository Repository `json:"repository"`
 
-	// Merge-queue state, resolved separately and joined on by URL — the PR
-	// search cannot report it. Nil when the PR is neither queued nor
-	// recently refused, which is the common case.
+	// Resolved separately and joined on by URL — the PR search reports
+	// neither. Base is set only when it is not the repository's default
+	// branch; Queue is nil unless the PR is queued or was recently refused,
+	// which is the common case.
+	Base  string      `json:"base,omitempty"`
 	Queue *QueueState `json:"queue,omitempty"`
 }
 
@@ -150,17 +154,20 @@ func main() {
 	}
 
 	if queueDryRun {
-		q := fetchQueueStates()
-		if !q.Complete {
-			log.Fatal("merge queue query failed; see the error above")
+		f := fetchPRFacts()
+		if !f.Complete {
+			log.Fatal("PR facts query failed; see the error above")
 		}
-		if len(q.States) == 0 {
+		if len(f.Queue) == 0 {
 			fmt.Println("no open PRs")
 		}
-		for url, s := range q.States {
+		for url, s := range f.Queue {
 			summary := s.Summary()
 			if summary == "" {
 				summary = "not queued"
+			}
+			if base := f.Base[url]; base != "" {
+				summary += "  (base " + base + ")"
 			}
 			fmt.Printf("%-60s %s\n", url, summary)
 		}
@@ -235,11 +242,11 @@ func main() {
 		// Merge-queue state for my own PRs. Independent of everything above
 		// for the same reason the runs poll is: a failure here must not
 		// disturb the PR counts.
-		var queue queueResult
+		var queue prFacts
 		var inQueue, refused int
 		if queueEnabled && !swiftbar {
-			queue = fetchQueueStates()
-			annotateQueue(all, queue)
+			queue = fetchPRFacts()
+			annotatePRs(all, queue)
 			inQueue, refused = splitQueue(all)
 			notifyRejections(all, notify)
 		}
@@ -531,7 +538,7 @@ func fetchPRs(review string) ([]PR, error) {
 	args := []string{"search", "prs",
 		"--state=open",
 		"--author=@me",
-		"--json=title,url,repository,createdAt",
+		"--json=title,url,number,repository,createdAt",
 	}
 	if review != "" {
 		args = append(args, "--review="+review)
@@ -761,16 +768,16 @@ func pickerItems(cache PRCache) []item {
 		suffix += reasons[pr.URL]
 		prs.items = append(prs.items, item{
 			label: row(prefix, parseGHTime(pr.CreatedAt),
-				fitText(fmt.Sprintf("[%s] ", pr.Repository.NameWithOwner), pr.Title, suffix)),
+				fitText(prHead(pr), pr.Title, suffix)),
 			url: pr.URL,
 		})
 	}
 
 	runs := section{title: "Workflow runs"}
 	for _, r := range cache.Runs {
-		// The run ID keeps labels unique: the picker matches the fuzzel
-		// selection back by exact label equality, so two runs of the same
-		// workflow in the same repo would otherwise collide.
+		// The run ID tells two runs of the same workflow apart at a glance.
+		// It is no longer load-bearing — selection goes by index, not by
+		// label — so it can go if the row ever needs the width.
 		prefix, suffix := "󰑐", ""
 		var dismiss int64
 		switch {
@@ -835,30 +842,54 @@ func pickerItems(cache PRCache) []item {
 	return items
 }
 
-// pick shows the menu and resolves the selection back to its item. fuzzel
-// dmenu hands back the chosen line verbatim, so labels are matched by
-// equality — which is why every one of them is made unique.
+// prHead names the PR a row belongs to. The number is what makes two rows
+// distinguishable when the titles match, and the base branch is what makes
+// them meaningful: a fix backported across release branches is one title on
+// several PRs, and the branch is the only thing separating them.
+func prHead(pr PR) string {
+	head := "[" + pr.Repository.NameWithOwner
+	if pr.Number > 0 {
+		head += fmt.Sprintf("#%d", pr.Number)
+	}
+	if pr.Base != "" {
+		head += " → " + pr.Base
+	}
+	return head + "] "
+}
+
+// pick shows the menu and returns the chosen item.
 func pick(items []item) (item, bool) {
 	entries := make([]string, 0, len(items))
 	for _, it := range items {
 		entries = append(entries, it.label)
 	}
 
-	cmd := exec.Command("fuzzel", "--dmenu",
+	cmd := exec.Command("fuzzel", "--dmenu", "--index",
 		fmt.Sprintf("--width=%d", pickerWidth), "--prompt", "GitHub > ")
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {
 		return item{}, false // user cancelled
 	}
+	return resolve(items, string(out))
+}
 
-	selected := strings.TrimSpace(string(out))
-	for _, it := range items {
-		if it.label == selected {
-			return it, true
-		}
+// resolve maps fuzzel's --index output back to the item it names.
+//
+// Asking for the index rather than the entry text is what makes selection
+// safe: matching the returned line against the labels fed in silently
+// resolved to the first of two identical ones, and two PRs can legitimately
+// share a title — the same fix backported to two release branches renders
+// identically once the ages round the same way.
+//
+// Anything that is not an index in range means nothing was chosen: no match
+// for what was typed, an empty line, or a fuzzel that answered with text.
+func resolve(items []item, out string) (item, bool) {
+	i, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || i < 0 || i >= len(items) {
+		return item{}, false
 	}
-	return item{}, false
+	return items[i], true
 }
 
 // openItem hands a URL to the browser and, for a failed run, records the
