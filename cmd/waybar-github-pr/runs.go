@@ -59,6 +59,28 @@ func (r Run) When() time.Time {
 	return parseGHTime(r.CreatedAt)
 }
 
+// created reports when the run was dispatched, which is what orders one
+// attempt at something against another. Deliberately distinct from When(),
+// which for a failure reports when it broke: two runs can break in a
+// different order from the one they were started in.
+func (r Run) created() time.Time {
+	if t := parseGHTime(r.CreatedAt); !t.IsZero() {
+		return t
+	}
+	if t := parseGHTime(r.RunStartedAt); !t.IsZero() {
+		return t
+	}
+	return parseGHTime(r.UpdatedAt)
+}
+
+// runKey identifies "the same thing being run", so one attempt at it can be
+// recognised as superseding another. Both halves are needed: the workflow
+// name alone collapses every terraform root into one key, and the rendered
+// title alone can collide between two workflows.
+func runKey(r Run) string {
+	return r.Name + "\x00" + r.Title()
+}
+
 // Tracks run IDs we've already notify-send'd an approval request for. Same
 // shape and same reasoning as seenNotifs in main.go: on the first poll after
 // start we baseline, so a daemon restart (make install pkills it) doesn't
@@ -332,8 +354,9 @@ type runListing struct {
 
 // fetchRuns collects, for every watched repo, the runs that need attention:
 // those waiting on a deployment gate this user can approve, and those this
-// user dispatched that are currently queued or in progress.
-func fetchRuns(repos []string, login string) runsResult {
+// user dispatched that are currently queued, in progress, or failed without
+// anything newer having superseded them.
+func fetchRuns(repos []string, login string, failedTTL time.Duration) runsResult {
 	res := runsResult{Complete: true}
 	if len(repos) == 0 || login == "" {
 		res.Complete = false
@@ -369,27 +392,67 @@ func fetchRuns(repos []string, login string) runsResult {
 			res.Complete = false
 			continue
 		}
-		for _, r := range mine.WorkflowRuns {
-			switch {
-			case r.Status == "queued" || r.Status == "in_progress" || r.Status == "pending":
-				r.Repo = repo
-				res.Runs = append(res.Runs, r)
-			case r.Status == "completed" && failedConclusion(r.Conclusion):
-				// A failed run must not vanish the way a successful one
-				// does — a broken production apply going quiet is the
-				// exact thing this pill exists to prevent. It sticks
-				// until dismissed from the picker.
-				if dismissed[r.ID] {
-					continue
-				}
-				r.Repo = repo
-				r.Failed = true
-				res.Runs = append(res.Runs, r)
-			}
-		}
+		res.Runs = append(res.Runs,
+			attentionRuns(repo, mine.WorkflowRuns, dismissed, failedTTL)...)
 	}
 
 	return res
+}
+
+// attentionRuns reduces one repo's dispatched-run listing to the runs worth
+// putting on the pill.
+func attentionRuns(repo string, listing []Run, dismissed map[int64]bool, failedTTL time.Duration) []Run {
+	// Newest dispatch of each thing being run. Computed rather than inferred
+	// from the listing's order: the endpoint sorts by created_at, which is
+	// not the timestamp a failure's own age is measured from, so leaning on
+	// the sort would make this quietly wrong if it ever changed.
+	//
+	// Every run counts here, successes and cancellations included. Re-running
+	// something and having it pass is the commonest way a failure stops
+	// mattering, and that is exactly the case a status filter would miss.
+	newest := make(map[string]time.Time, len(listing))
+	for _, r := range listing {
+		if k, at := runKey(r), r.created(); at.After(newest[k]) {
+			newest[k] = at
+		}
+	}
+
+	var out []Run
+	for _, r := range listing {
+		switch {
+		case r.Status == "queued" || r.Status == "in_progress" || r.Status == "pending":
+			r.Repo = repo
+			out = append(out, r)
+
+		case r.Status == "completed" && failedConclusion(r.Conclusion):
+			// A failed run must not vanish the way a successful one does —
+			// a broken production apply going quiet is the exact thing this
+			// pill exists to prevent — so it sticks until dismissed from the
+			// picker, or until one of the two rules below retires it.
+			if dismissed[r.ID] {
+				continue
+			}
+			// Superseded: something newer has run the same thing, so that
+			// run's state is the one that counts. Re-running is how you act
+			// on a failure, which makes the older row noise whether the
+			// retry passed, failed again, or is still going.
+			if newest[runKey(r)].After(r.created()) {
+				continue
+			}
+			r.Repo = repo
+			r.Failed = true
+			// Stale: nothing newer, and nobody has acted on it either. The
+			// default window is wide enough that a Friday-evening failure is
+			// still on the pill on Monday morning.
+			if failedTTL > 0 {
+				if when := r.When(); !when.IsZero() && time.Since(when) > failedTTL {
+					continue
+				}
+			}
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // approvableBy reports whether the current user can approve a pending

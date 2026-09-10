@@ -73,6 +73,7 @@ func main() {
 	var queueEnabled bool
 	var watchRunsCSV string
 	var runsTTL time.Duration
+	var failedTTL time.Duration
 	var discoverOnly bool
 	var applyRepo string
 	var applyWorkflow string
@@ -95,6 +96,8 @@ func main() {
 		"Extra owner/repo entries to poll for runs, comma-separated — unioned with the auto-discovered set")
 	flag.DurationVar(&runsTTL, "runs-ttl", time.Hour,
 		"How long the discovered set of reviewer-gated repos stays cached before re-scanning")
+	flag.DurationVar(&failedTTL, "failed-ttl", 72*time.Hour,
+		"How long a failed run stays on the pill when nothing newer has run the same thing (0 keeps it until dismissed)")
 	flag.BoolVar(&discoverOnly, "discover-only", false,
 		"Print the discovered reviewer-gated repos and exit")
 	flag.StringVar(&applyRepo, "apply-repo", "",
@@ -210,7 +213,7 @@ func main() {
 		var approvalRuns, runningRuns, failedRuns []Run
 		if runsEnabled && !swiftbar {
 			repos, login := watchedRepos(watchRuns, runsTTL)
-			runs = fetchRuns(repos, login)
+			runs = fetchRuns(repos, login, failedTTL)
 			approvalRuns, runningRuns, failedRuns = splitRuns(runs.Runs)
 			notifyApprovals(approvalRuns, notify)
 		}
