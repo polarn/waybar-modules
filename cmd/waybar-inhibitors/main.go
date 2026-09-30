@@ -112,7 +112,7 @@ func main() {
 		screenSaverIface, m.ssOwner, m.stateFile, m.signum, m.barName)
 
 	// Write the initial state so waybar's first read always finds a file.
-	m.publish()
+	m.writeState()
 
 	for msg := range ch {
 		m.handle(msg)
@@ -202,6 +202,12 @@ func (m *monitor) handle(msg *dbus.Message) {
 }
 
 func (m *monitor) publish() {
+	if m.writeState() {
+		m.pokeWaybar()
+	}
+}
+
+func (m *monitor) writeState() bool {
 	w := waybar.New()
 	n := len(m.cookies)
 	w.Text = fmt.Sprintf("%d", n)
@@ -216,18 +222,18 @@ func (m *monitor) publish() {
 	b, err := json.Marshal(w)
 	if err != nil {
 		log.Printf("marshal: %v", err)
-		return
+		return false
 	}
 	if string(b) == m.last {
-		return // unchanged; don't churn waybar
+		return false // unchanged; don't churn waybar
 	}
 	m.last = string(b)
 
 	if err := writeFileAtomic(m.stateFile, append(b, '\n')); err != nil {
 		log.Printf("write state file: %v", err)
-		return
+		return false
 	}
-	m.pokeWaybar()
+	return true
 }
 
 func buildTooltip(cookies map[uint32]inhibitor) string {
