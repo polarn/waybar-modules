@@ -70,6 +70,37 @@ func TestRootsForFile(t *testing.T) {
 	}
 }
 
+func TestFoldApplyRunsPartialSuccessList(t *testing.T) {
+	run := func(root, sha, status, conclusion string) applyRunListRun {
+		return applyRunListRun{
+			DisplayTitle: "terraform apply " + root + " (@polarn)",
+			HeadSHA:      sha, Status: status, Conclusion: conclusion,
+		}
+	}
+	recent := applyRunList{WorkflowRuns: []applyRunListRun{
+		run("aws/prod", "p3", "waiting", ""),
+		run("azure/prod", "a2", "completed", "success"),
+		run("aws/prod", "p2", "completed", "success"),
+		run("github", "g2", "completed", "failure"),
+	}}
+	success := applyRunList{WorkflowRuns: []applyRunListRun{
+		run("aws/prod", "p2", "completed", "success"),
+		run("azure/prod", "a1", "completed", "success"),
+		run("github", "g1", "completed", "success"),
+	}}
+	last, busy := foldApplyRuns(recent, success, []string{"aws/prod", "azure/prod", "github"})
+
+	want := map[string]string{"aws/prod": "p2", "azure/prod": "a2", "github": "g1"}
+	for root, sha := range want {
+		if last[root] != sha {
+			t.Errorf("last[%s] = %q, want %q", root, last[root], sha)
+		}
+	}
+	if !busy["aws/prod"] || busy["azure/prod"] {
+		t.Errorf("busy = %v, want only aws/prod", busy)
+	}
+}
+
 func TestParseRunRoot(t *testing.T) {
 	if got := parseRunRoot("terraform apply google/monitoring-prod (@polarn)"); got != "google/monitoring-prod" {
 		t.Errorf("got %q", got)

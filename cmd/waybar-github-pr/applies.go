@@ -273,12 +273,14 @@ type mainCommit struct {
 }
 
 type applyRunList struct {
-	WorkflowRuns []struct {
-		DisplayTitle string `json:"display_title"`
-		HeadSHA      string `json:"head_sha"`
-		Status       string `json:"status"`
-		Conclusion   string `json:"conclusion"`
-	} `json:"workflow_runs"`
+	WorkflowRuns []applyRunListRun `json:"workflow_runs"`
+}
+
+type applyRunListRun struct {
+	DisplayTitle string `json:"display_title"`
+	HeadSHA      string `json:"head_sha"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
 }
 
 // inFlightStatus covers every state an apply can be in before it has
@@ -301,22 +303,43 @@ func inFlightStatus(s string) bool {
 // If that line ever changes upstream, this stops matching and roots simply
 // look never-applied — over-reporting, which is the safe direction.
 //
-// Two calls rather than one: filtering to successes keeps the 100-run window
-// full of the history the cut point needs, while in-flight runs are by
-// definition recent, so a short unfiltered page finds them all.
+// The unfiltered page is authoritative for every root it reaches. The
+// status=success list is search-backed and can come back missing recent runs,
+// so it only fills in roots whose last success is older than that page.
 func applyState(repo, workflow string, roots []string) (map[string]string, map[string]bool, error) {
+	var recent applyRunList
+	path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?per_page=100", repo, workflow)
+	if err := ghJSON(&recent, path); err != nil {
+		return nil, nil, err
+	}
+	var success applyRunList
+	path = fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?status=success&per_page=100", repo, workflow)
+	if err := ghJSON(&success, path); err != nil {
+		return nil, nil, err
+	}
+	last, busy := foldApplyRuns(recent, success, roots)
+	return last, busy, nil
+}
+
+// foldApplyRuns expects both lists newest first, so the first hit per root wins.
+func foldApplyRuns(recent, success applyRunList, roots []string) (map[string]string, map[string]bool) {
 	known := make(map[string]bool, len(roots))
 	for _, r := range roots {
 		known[r] = true
 	}
-
-	var success applyRunList
-	path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?status=success&per_page=100", repo, workflow)
-	if err := ghJSON(&success, path); err != nil {
-		return nil, nil, err
-	}
-	// Runs come back newest first, so the first hit per root wins.
 	last := make(map[string]string)
+	busy := make(map[string]bool)
+	for _, r := range recent.WorkflowRuns {
+		root := parseRunRoot(r.DisplayTitle)
+		if root == "" || !known[root] {
+			continue
+		}
+		if inFlightStatus(r.Status) {
+			busy[root] = true
+		} else if r.Conclusion == "success" && last[root] == "" {
+			last[root] = r.HeadSHA
+		}
+	}
 	for _, r := range success.WorkflowRuns {
 		if r.Conclusion != "success" {
 			continue
@@ -327,22 +350,7 @@ func applyState(repo, workflow string, roots []string) (map[string]string, map[s
 		}
 		last[root] = r.HeadSHA
 	}
-
-	var recent applyRunList
-	path = fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?per_page=30", repo, workflow)
-	if err := ghJSON(&recent, path); err != nil {
-		return nil, nil, err
-	}
-	busy := make(map[string]bool)
-	for _, r := range recent.WorkflowRuns {
-		if !inFlightStatus(r.Status) {
-			continue
-		}
-		if root := parseRunRoot(r.DisplayTitle); root != "" && known[root] {
-			busy[root] = true
-		}
-	}
-	return last, busy, nil
+	return last, busy
 }
 
 // parseRunRoot pulls the root out of "terraform apply <root> (@<actor>)".
