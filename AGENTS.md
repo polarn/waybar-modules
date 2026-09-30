@@ -155,6 +155,10 @@ Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
 
 The PR list and the notification list are independent queries that overlap: a notification with reason `author`/`assign`/`comment` names a PR that is usually already in your open-PR list, so the picker offered the same thing twice. Notifications are matched against the PR entries by resolved web URL (`subjectWebURL` turns `/repos/O/R/pulls/N` into `/O/R/pull/N`, which is exactly what `gh search prs --json url` returns) and folded onto the existing row as a trailing bell plus reason, rather than dropped — the reason is the part worth keeping.
 
+### Scopes (`--scope`, `--work-owners`)
+
+One binary runs as two pills: `--scope=work` keeps repos whose owner is in `--work-owners`, `--scope=personal` keeps the rest (upstream projects included). The filter is client-side and applies to PRs, notifications and runs alike, so each notify-send fires from exactly one instance. The scope names the cache file (`waybar-github-prs-<scope>.json`), so `--open` must pass the same `--scope`. Run discovery sweeps `/user/orgs` only and never finds user-owned repos, which is why the personal pill runs with `--runs=false` and skips the ~70-call sweep. `--hide-empty` blanks the text (waybar hides the pill) when nothing is open or pending.
+
 ### SwiftBar mode
 
 `--swiftbar` implies `--notify=false` (no `notify-send` on macOS) and skips the `$XDG_RUNTIME_DIR` cache write (the `--open` flow isn't used). Title is `approved·total :arrow.triangle.pull:`, with a `:bell.badge:` variant when there are unread notifications. Dropdown is a single `Open PRs | href=https://github.com/pulls` row — no per-PR list (intentionally simple; can be extended later by adding a list subcommand).

@@ -85,7 +85,16 @@ func main() {
 	var applyDryRun bool
 	var applyIncludeUnapplied bool
 	var queueDryRun bool
+	var scopeName string
+	var workOwnersCSV string
+	var hideEmpty bool
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
+	flag.StringVar(&scopeName, "scope", "",
+		"work or personal: keep only repos owned by --work-owners, or only the rest (empty keeps everything). Also names the --open cache")
+	flag.StringVar(&workOwnersCSV, "work-owners", "",
+		"Comma-separated owners (users or orgs) whose repos count as work for --scope")
+	flag.BoolVar(&hideEmpty, "hide-empty", false,
+		"Print empty text, which hides the pill, when nothing is open or pending")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
 	flag.BoolVar(&swiftbar, "swiftbar", false, "Emit SwiftBar streamable format instead of waybar JSON (implies --notify=false)")
@@ -118,9 +127,25 @@ func main() {
 		"Also report roots that have never been applied through the workflow (no baseline, noisy)")
 	flag.Parse()
 
+	sc := scope{name: scopeName, owners: map[string]bool{}}
+	for _, o := range strings.Split(workOwnersCSV, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			sc.owners[strings.ToLower(o)] = true
+		}
+	}
+	switch scopeName {
+	case "", "work", "personal":
+	default:
+		log.Fatalf("--scope must be work or personal, got %q", scopeName)
+	}
+
 	if open {
-		openPRs()
+		openPRs(sc.name)
 		return
+	}
+
+	if sc.name != "" && len(sc.owners) == 0 {
+		log.Fatal("--scope needs --work-owners")
 	}
 
 	var watchRuns []string
@@ -209,6 +234,7 @@ func main() {
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
+		approved, all = keepPRs(approved, sc), keepPRs(all, sc)
 
 		// Runs are fetched independently of the PR calls above: a repo that
 		// fails to answer must not blank the PR counts. When any watched repo
@@ -220,7 +246,7 @@ func main() {
 		var approvalRuns, runningRuns, failedRuns []Run
 		if runsEnabled && !swiftbar {
 			repos, login := watchedRepos(watchRuns, runsTTL)
-			runs = fetchRuns(repos, login, failedTTL)
+			runs = fetchRuns(keepRepos(repos, sc), login, failedTTL)
 			approvalRuns, runningRuns, failedRuns = splitRuns(runs.Runs)
 			notifyApprovals(approvalRuns, notify)
 		}
@@ -273,9 +299,9 @@ func main() {
 
 		// Pull notifications, fire notify-send for any new ones, and feed the
 		// filtered count into the pill / tooltip / left-click menu.
-		notifs := processNotifications(notifyReasons, notify)
+		notifs := processNotifications(notifyReasons, notify, sc)
 		if !swiftbar {
-			writePRCache(all, approved, notifs, runs.Runs, pending)
+			writePRCache(sc.name, all, approved, notifs, runs.Runs, pending)
 		}
 
 		if swiftbar {
@@ -356,6 +382,10 @@ func main() {
 
 		w := waybar.New()
 		w.Text = text
+		if hideEmpty && len(all) == 0 && len(notifs) == 0 && len(pending) == 0 &&
+			!(runs.Complete && len(runs.Runs) > 0) {
+			w.Text = ""
+		}
 		w.ToolTip = strings.Join(tooltips, "\n")
 		// class carries two independent dimensions, so it goes out as an
 		// array: the PR status, plus the run state when there is one.
@@ -431,7 +461,7 @@ func fetchNotifications() ([]Notification, error) {
 // daemon doesn't spam notify-send for everything sitting unread on startup),
 // and fires notify-send for genuinely new notifications. Returns the filtered
 // set so the caller can display a count and tooltip.
-func processNotifications(reasons map[string]bool, notify bool) []Notification {
+func processNotifications(reasons map[string]bool, notify bool, sc scope) []Notification {
 	all, err := fetchNotifications()
 	if err != nil {
 		log.Printf("notifications: %s", err)
@@ -443,6 +473,9 @@ func processNotifications(reasons map[string]bool, notify bool) []Notification {
 			continue
 		}
 		if !reasons[n.Reason] {
+			continue
+		}
+		if !sc.keeps(n.Repository.FullName) {
 			continue
 		}
 		if subjectIsDone(n) {
@@ -557,6 +590,39 @@ func fetchPRs(review string) ([]PR, error) {
 	return prs, nil
 }
 
+type scope struct {
+	name   string
+	owners map[string]bool
+}
+
+func (s scope) keeps(repo string) bool {
+	if s.name == "" {
+		return true
+	}
+	owner, _, _ := strings.Cut(repo, "/")
+	return s.owners[strings.ToLower(owner)] == (s.name == "work")
+}
+
+func keepPRs(prs []PR, s scope) []PR {
+	var out []PR
+	for _, pr := range prs {
+		if s.keeps(pr.Repository.NameWithOwner) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+func keepRepos(repos []string, s scope) []string {
+	var out []string
+	for _, r := range repos {
+		if s.keeps(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func isApproved(pr PR, approved []PR) bool {
 	for _, a := range approved {
 		if a.URL == pr.URL {
@@ -566,10 +632,13 @@ func isApproved(pr PR, approved []PR) bool {
 	return false
 }
 
-func cacheFilePath() string {
+func cacheFilePath(scope string) string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		dir = os.TempDir()
+	}
+	if scope != "" {
+		return filepath.Join(dir, "waybar-github-prs-"+scope+".json")
 	}
 	return filepath.Join(dir, "waybar-github-prs.json")
 }
@@ -582,7 +651,7 @@ type PRCache struct {
 	Pending       []PendingRoot  `json:"pending,omitempty"`
 }
 
-func writePRCache(all, approved []PR, notifs []Notification, runs []Run, pending []PendingRoot) {
+func writePRCache(scope string, all, approved []PR, notifs []Notification, runs []Run, pending []PendingRoot) {
 	data, err := json.Marshal(PRCache{
 		All: all, Approved: approved, Notifications: notifs, Runs: runs, Pending: pending,
 	})
@@ -590,7 +659,7 @@ func writePRCache(all, approved []PR, notifs []Notification, runs []Run, pending
 		log.Printf("Error marshaling PR cache: %s", err)
 		return
 	}
-	if err := os.WriteFile(cacheFilePath(), data, 0600); err != nil {
+	if err := os.WriteFile(cacheFilePath(scope), data, 0600); err != nil {
 		log.Printf("Error writing PR cache: %s", err)
 	}
 }
@@ -684,8 +753,8 @@ func divider(title string) string {
 // openPRs opens a fuzzel picker that merges the cached open PRs with any
 // unread notifications, workflow runs and roots pending apply. Selecting an
 // entry opens the relevant URL in the default browser.
-func openPRs() {
-	data, err := os.ReadFile(cacheFilePath())
+func openPRs(scope string) {
+	data, err := os.ReadFile(cacheFilePath(scope))
 	if err != nil {
 		log.Printf("No cached items: %s", err)
 		return
