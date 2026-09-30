@@ -19,7 +19,7 @@ The name is now narrower than the contents; see "Why it is still called waybar-m
 Bar modules (daemon, prints waybar JSON on an interval):
 
 - `cmd/waybar-gitlab-mr/` - Count of GitLab merge requests awaiting review
-- `cmd/waybar-github-pr/` - Count of approved GitHub PRs ready to merge, with a fuzzel picker on click. SwiftBar-enabled.
+- `cmd/waybar-github-pr/` - Your open PRs (approved·total), GitHub notifications, workflow runs, merge-queue state and terraform roots pending apply, with a fuzzel picker on click. Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
 - `cmd/waybar-wiim-nowplaying/` - Now-playing info from a WiiM device (amp/mini/pro), with volume control. SwiftBar-enabled.
 - `cmd/waybar-cpu-temp/` - CPU temperature, tooltip lists every CPU hwmon sensor
 - `cmd/waybar-gpu-temp/` - GPU temperature; picks the card with the most sensors (the discrete one), tooltip lists loaded llama-swap models
@@ -47,16 +47,25 @@ Packages:
 - `pkg/hwmon/` - Shared hwmon sensor discovery and reading
 - `pkg/waybar/` - Shared `Waybar` struct with JSON output and `Print()` method
 
+## Where it is wired up
+
+Every consumer lives in chezmoi (`~/.local/share/chezmoi`). Its `CLAUDE.md` has a table mapping each pill to its module file and binary.
+
+- `dot_config/waybar/modules/<name>.jsonc`: each pill's `exec` line, flags, clicks and `restart-interval`. `config.jsonc` places it on a bar.
+- `dot_config/waybar/style.css`: colours keyed `#custom-<name>.<class>`, so a new `class` needs a rule there.
+- `run_onchange_install-waybar-modules.sh`: the `go install …@latest` list. For macOS, `run_onchange_install-swiftbar-modules.sh` and `dot_config/swiftbar/plugins/`.
+- `dot_config/systemd/user/waybar-inhibitors.service`: `waybar-inhibitors` runs as a user unit, and the pill reads its output file.
+
 ## Building
 
 - `make build` - Compiles the 13 desktop binaries to `./build/`
-- `make install` - Builds, installs to `~/.local/bin/`, and kills running instances so waybar restarts them
+- `make install` - Builds, installs to `~/.local/bin/`, and kills running instances. Waybar respawns only the modules whose config sets `restart-interval`, so run `systemctl --user restart waybar` afterwards
 - `make build-swiftbar` / `make install-swiftbar` - Same flow but only for the SwiftBar-enabled subset (currently `waybar-github-pr`, `waybar-wiim-nowplaying`). Used on macOS where the Linux-only modules (hwmon temps, tradfri, etc.) wouldn't compile or be useful.
 - `make clean` - Removes `./build/`
 
 **`bambu-exporter` is deliberately not in `make build`.** It is a server, and `make install` copies everything in `./build/*` into `~/.local/bin` — not where a server belongs. It is built by `container-images/bambu-exporter/Dockerfile` from a pinned `SRC_REF`, so shipping a change to it means bumping that SHA and re-pinning the resulting digest in flux. Build it directly with `go build ./cmd/bambu-exporter` when working on it locally.
 
-Note `make install` does a blind `pkill -x` on every binary name it installs. Harmless for the bar modules (waybar respawns them), but it will also kill a locally-running exporter.
+Note `make install` does a blind `pkill -x` on every binary name it installs, so it also kills a locally-running exporter.
 
 ## Conventions
 
@@ -141,17 +150,17 @@ Uses the `gh` CLI (`gh search prs`) rather than a Go library — no token env va
 
 ### Query
 
-`gh search prs --review=approved --state=open --author=@me` — finds all open PRs authored by the current user that have at least one approved review.
+Two `gh search prs --state=open --author=@me` calls per tick: one with `--review=approved` for the approved count, and one without for the total.
 
 ### Click-to-open (`--open` flag)
 
-The polling loop writes the current PR list to `$XDG_RUNTIME_DIR/waybar-github-prs.json` as a cache. The `--open` flag reads this cache and:
+The polling loop writes the current PR list to `$XDG_RUNTIME_DIR/waybar-github-prs-<scope>.json` as a cache (`waybar-github-prs.json` without `--scope`). The `--open` flag reads this cache and:
 
 - **0 PRs**: does nothing
 - **1 PR**: opens directly via `xdg-open`
 - **Multiple PRs**: presents a fuzzel dmenu for selection, then opens the chosen PR
 
-Waybar config wires this up via `"on-click": "waybar-github-pr --open"`.
+Waybar config wires this up via `"on-click": "waybar-github-pr --open --scope=<scope>"`, in chezmoi's `dot_config/waybar/modules/github.jsonc`.
 
 The PR list and the notification list are independent queries that overlap: a notification with reason `author`/`assign`/`comment` names a PR that is usually already in your open-PR list, so the picker offered the same thing twice. Notifications are matched against the PR entries by resolved web URL (`subjectWebURL` turns `/repos/O/R/pulls/N` into `/O/R/pull/N`, which is exactly what `gh search prs --json url` returns) and folded onto the existing row as a trailing bell plus reason, rather than dropped — the reason is the part worth keeping.
 
@@ -266,7 +275,8 @@ Pick the shape first — the steps differ, and following the bar-module path for
 2. Use `pkg/waybar.New()`, set `.Text`, `.ToolTip`, `.Class`, `.Alt`.
 3. Call `.Print()` each iteration to emit JSON, then sleep.
 4. Add the build line to `Makefile`.
-5. Add the module config in chezmoi under `dot_config/waybar/modules/`.
+5. Add the module config in chezmoi under `dot_config/waybar/modules/`, with `restart-interval` so waybar respawns it after `make install`, and place it in `config.jsonc`.
+6. Add the `go install …@latest` line to chezmoi's `run_onchange_install-waybar-modules.sh`.
 
 **A CLI** (reference: `cmd/tradfri-ctl`, or `cmd/bambu-ctl` if it needs a pill)
 
