@@ -117,12 +117,13 @@ type prFacts struct {
 	// backport onto v10.2 needs saying; a PR onto main does not, and
 	// labelling every row with it would be noise.
 	Base     map[string]string
+	Comments map[string]int
 	Complete bool
 }
 
 // factsQuery asks, in one request, for every open PR of mine: whether it sits
-// in a merge queue and where, its most recent removal from one, and the base
-// branch it targets.
+// in a merge queue and where, its most recent removal from one, the base
+// branch it targets, and how many comments it has.
 //
 // Reading the removal event rather than diffing successive polls is what lets
 // a refusal survive a daemon restart — `make install` kills this process, and
@@ -138,6 +139,8 @@ const factsQuery = `
       ... on PullRequest {
         url
         baseRefName
+        totalCommentsCount
+        comments(last: 100) { nodes { author { __typename } } }
         repository { defaultBranchRef { name } }
         isInMergeQueue
         mergeQueueEntry {
@@ -168,6 +171,14 @@ func fetchPRFacts() prFacts {
 							Name string `json:"name"`
 						} `json:"defaultBranchRef"`
 					} `json:"repository"`
+					TotalCommentsCount int `json:"totalCommentsCount"`
+					Comments           struct {
+						Nodes []struct {
+							Author *struct {
+								Typename string `json:"__typename"`
+							} `json:"author"`
+						} `json:"nodes"`
+					} `json:"comments"`
 					IsInMergeQueue  bool `json:"isInMergeQueue"`
 					MergeQueueEntry *struct {
 						State      string `json:"state"`
@@ -207,6 +218,7 @@ func fetchPRFacts() prFacts {
 	out := prFacts{
 		Queue:    make(map[string]QueueState, len(resp.Data.Search.Nodes)),
 		Base:     make(map[string]string),
+		Comments: make(map[string]int),
 		Complete: true,
 	}
 	for _, n := range resp.Data.Search.Nodes {
@@ -222,6 +234,14 @@ func fetchPRFacts() prFacts {
 		if n.BaseRefName != "" && n.BaseRefName != def {
 			out.Base[n.URL] = n.BaseRefName
 		}
+
+		comments := n.TotalCommentsCount
+		for _, c := range n.Comments.Nodes {
+			if c.Author != nil && c.Author.Typename == "Bot" {
+				comments--
+			}
+		}
+		out.Comments[n.URL] = comments
 
 		q := QueueState{InQueue: n.IsInMergeQueue}
 		if e := n.MergeQueueEntry; e != nil {
@@ -250,6 +270,7 @@ func annotatePRs(prs []PR, f prFacts) {
 	}
 	for i := range prs {
 		prs[i].Base = f.Base[prs[i].URL]
+		prs[i].Comments = f.Comments[prs[i].URL]
 		if s, ok := f.Queue[prs[i].URL]; ok && (s.InQueue || s.Rejected()) {
 			prs[i].Queue = &s
 		}

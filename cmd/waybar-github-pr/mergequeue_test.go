@@ -122,6 +122,14 @@ func TestAnnotateQueueAndSplit(t *testing.T) {
 	}
 }
 
+func TestAnnotateComments(t *testing.T) {
+	prs := []PR{{URL: "talked"}, {URL: "absent"}}
+	annotatePRs(prs, prFacts{Complete: true, Comments: map[string]int{"talked": 3}})
+	if prs[0].Comments != 3 || prs[1].Comments != 0 {
+		t.Errorf("comments = (%d, %d), want (3, 0)", prs[0].Comments, prs[1].Comments)
+	}
+}
+
 // notify-send must not fire for refusals already on record when the daemon
 // starts — make install kills this process, and a restart that re-announced
 // the backlog would be worse than useless.

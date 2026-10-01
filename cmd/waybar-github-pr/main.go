@@ -26,8 +26,18 @@ type PR struct {
 	// neither. Base is set only when it is not the repository's default
 	// branch; Queue is nil unless the PR is queued or was recently refused,
 	// which is the common case.
-	Base  string      `json:"base,omitempty"`
-	Queue *QueueState `json:"queue,omitempty"`
+	Base     string      `json:"base,omitempty"`
+	Queue    *QueueState `json:"queue,omitempty"`
+	Comments int         `json:"comments,omitempty"`
+}
+
+const glyphComments = "\U000F0182"
+
+func commentsSuffix(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" %s %d", glyphComments, n)
 }
 
 type Repository struct {
@@ -285,10 +295,11 @@ func main() {
 				prefix = "✓ "
 			}
 			line := fmt.Sprintf("%s[%s] %s", prefix,
-				pangoEscape(pr.Repository.NameWithOwner), pangoEscape(trimRunes(pr.Title, 60)))
+				pangoEscape(pr.Repository.NameWithOwner), pangoEscape(trimRunes(pr.Title, tooltipTitleRunes)))
 			if pr.Queue != nil {
 				line += " · " + pangoEscape(pr.Queue.Summary())
 			}
+			line += commentsSuffix(pr.Comments)
 			tooltips = append(tooltips, line)
 		}
 
@@ -340,11 +351,8 @@ func main() {
 			tooltips = append(tooltips, "")
 			tooltips = append(tooltips, "<b>Notifications</b>")
 			for _, n := range notifs {
-				line := fmt.Sprintf("  [%s] %s · %s", n.Reason, n.Repository.FullName, n.Subject.Title)
-				if len(line) > 80 {
-					line = line[:77] + "..."
-				}
-				tooltips = append(tooltips, line)
+				tooltips = append(tooltips, fmt.Sprintf("  [%s] %s · %s", pangoEscape(n.Reason),
+					pangoEscape(n.Repository.FullName), pangoEscape(trimRunes(n.Subject.Title, tooltipTitleRunes))))
 			}
 		}
 
@@ -366,7 +374,7 @@ func main() {
 					suffix = " · " + pangoEscape(r.Conclusion)
 				}
 				line := fmt.Sprintf("  %s [%s] %s%s", glyph,
-					pangoEscape(r.Repo), pangoEscape(trimRunes(r.Title(), 60)), suffix)
+					pangoEscape(r.Repo), pangoEscape(trimRunes(r.Title(), tooltipTitleRunes)), suffix)
 				tooltips = append(tooltips, line)
 			}
 		}
@@ -386,7 +394,7 @@ func main() {
 			!(runs.Complete && len(runs.Runs) > 0) {
 			w.Text = ""
 		}
-		w.ToolTip = strings.Join(tooltips, "\n")
+		w.ToolTip = unwrapped(tooltips)
 		// class carries two independent dimensions, so it goes out as an
 		// array: the PR status, plus the run state when there is one.
 		//
@@ -834,7 +842,7 @@ func pickerItems(cache PRCache) []item {
 		if pr.Queue != nil {
 			suffix = " · " + pr.Queue.Summary()
 		}
-		suffix += reasons[pr.URL]
+		suffix += commentsSuffix(pr.Comments) + reasons[pr.URL]
 		prs.items = append(prs.items, item{
 			label: row(prefix, parseGHTime(pr.CreatedAt),
 				fitText(prHead(pr), pr.Title, suffix)),
@@ -1016,6 +1024,12 @@ func trimRunes(s string, n int) string {
 		return string(r[:n])
 	}
 	return string(r[:n-3]) + "..."
+}
+
+const tooltipTitleRunes = 80
+
+func unwrapped(lines []string) string {
+	return `<span allow_breaks="false">` + strings.Join(lines, "\n") + `</span>`
 }
 
 // pangoEscape makes text safe for the tooltip, which waybar renders as Pango

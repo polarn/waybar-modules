@@ -87,6 +87,18 @@ func TestPickerItems(t *testing.T) {
 			t.Errorf("PR row %q does not carry the notification reason", items[0].label)
 		}
 	})
+
+	t.Run("a PR row shows its comment count", func(t *testing.T) {
+		talked := pr
+		talked.Comments = 3
+		items := pickerItems(PRCache{All: []PR{talked, pr}})
+		if !strings.HasSuffix(items[0].label, glyphComments+" 3") {
+			t.Errorf("PR row %q does not end with the comment count", items[0].label)
+		}
+		if strings.Contains(items[1].label, glyphComments) {
+			t.Errorf("PR row %q shows a count for a PR with no comments", items[1].label)
+		}
+	})
 }
 
 func TestDividerFitsPickerWidth(t *testing.T) {
