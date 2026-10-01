@@ -19,7 +19,7 @@ The name is now narrower than the contents; see "Why it is still called waybar-m
 Bar modules (daemon, prints waybar JSON on an interval):
 
 - `cmd/waybar-gitlab-mr/` - Count of GitLab merge requests awaiting review
-- `cmd/waybar-github-pr/` - Your open PRs (approved·total), GitHub notifications, workflow runs, merge-queue state and terraform roots pending apply, with a fuzzel picker on click. Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
+- `cmd/waybar-github-pr/` - Your open PRs (approved·total), PRs awaiting your or your team's review, GitHub notifications, workflow runs, merge-queue state and terraform roots pending apply, with a fuzzel picker on click. Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
 - `cmd/waybar-wiim-nowplaying/` - Now-playing info from a WiiM device (amp/mini/pro), with volume control. SwiftBar-enabled.
 - `cmd/waybar-cpu-temp/` - CPU temperature, tooltip lists every CPU hwmon sensor
 - `cmd/waybar-gpu-temp/` - GPU temperature; picks the card with the most sensors (the discrete one), tooltip lists loaded llama-swap models
@@ -165,6 +165,10 @@ Waybar config wires this up via `"on-click": "waybar-github-pr --open --scope=<s
 The PR list and the notification list are independent queries that overlap: a notification with reason `author`/`assign`/`comment` names a PR that is usually already in your open-PR list, so the picker offered the same thing twice. Notifications are matched against the PR entries by resolved web URL (`subjectWebURL` turns `/repos/O/R/pulls/N` into `/O/R/pull/N`, which is exactly what `gh search prs --json url` returns) and folded onto the existing row as a trailing bell plus reason, rather than dropped — the reason is the part worth keeping.
 
 PR comment counts (tooltip and picker, not the pill) ride on the merge-queue facts query: `totalCommentsCount` (issue comments, review-thread comments and non-empty review bodies) minus bot-authored issue comments, because `linear-code` and the `github-actions` terraform plans comment on nearly every infra PR. GTK3 tooltips wrap at 70 chars (`max-width-chars` is hard-coded in `gtktooltipwindow.ui` and unreachable from CSS), so the tooltip goes out inside one `<span allow_breaks="false">` and grows to its longest line instead.
+
+### Review requests (`--reviews`)
+
+One GraphQL search, `review-requested:@me -author:@me`, covers both of GitHub's dashboard sections ("Needs your review" and "Needs your teams' review"). `-author:@me` keeps out your own PRs when CODEOWNERS requests a team you're in. A row names the requested teams by slug, unless you're also requested by name, in which case it names none. Both kinds also send a `review_requested` notification, but that leaves the pill once it's read, often from email, while the request is still open. The search keeps the PR on the pill until it's reviewed, and the picker folds any unread notification onto the review row the same way `author` notifications fold onto your own PRs. The pill shows a count (nf-oct-code_review) and adds the `review` class. A failed query drops the segment rather than showing 0.
 
 ### Scopes (`--scope`, `--work-owners`)
 

@@ -85,6 +85,7 @@ func main() {
 	var notifyReasonsCSV string
 	var runsEnabled bool
 	var queueEnabled bool
+	var reviewsEnabled bool
 	var watchRunsCSV string
 	var runsTTL time.Duration
 	var failedTTL time.Duration
@@ -115,6 +116,8 @@ func main() {
 		"Track GitHub Actions runs that need attention (waiting on my approval, or dispatched by me and still going)")
 	flag.BoolVar(&queueEnabled, "merge-queue", true,
 		"Track whether my PRs are sitting in a merge queue, or were refused by one")
+	flag.BoolVar(&reviewsEnabled, "reviews", true,
+		"Track open PRs whose review is requested from me or one of my teams")
 	flag.StringVar(&watchRunsCSV, "watch-runs", "",
 		"Extra owner/repo entries to poll for runs, comma-separated — unioned with the auto-discovered set")
 	flag.DurationVar(&runsTTL, "runs-ttl", time.Hour,
@@ -287,6 +290,11 @@ func main() {
 			notifyRejections(all, notify)
 		}
 
+		var reviews reviewsResult
+		if reviewsEnabled && !swiftbar {
+			reviews = fetchReviews(sc)
+		}
+
 		var tooltips []string
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
@@ -312,7 +320,7 @@ func main() {
 		// filtered count into the pill / tooltip / left-click menu.
 		notifs := processNotifications(notifyReasons, notify, sc)
 		if !swiftbar {
-			writePRCache(sc.name, all, approved, notifs, runs.Runs, pending)
+			writePRCache(sc.name, all, approved, reviews.Requests, notifs, runs.Runs, pending)
 		}
 
 		if swiftbar {
@@ -328,6 +336,9 @@ func main() {
 			if refused > 0 {
 				text += fmt.Sprintf(" %s %d", glyphDequeued, refused)
 			}
+		}
+		if n := len(reviews.Requests); n > 0 {
+			text += fmt.Sprintf(" %s %d", glyphReview, n)
 		}
 		if len(notifs) > 0 {
 			text += fmt.Sprintf(" 󰂜 %d", len(notifs))
@@ -345,6 +356,15 @@ func main() {
 		}
 		if n := len(pending); n > 0 {
 			text += fmt.Sprintf(" 󰅧 %d", n)
+		}
+
+		if len(reviews.Requests) > 0 {
+			tooltips = append(tooltips, "")
+			tooltips = append(tooltips, "<b>Review requested</b>")
+			for _, r := range reviews.Requests {
+				tooltips = append(tooltips, fmt.Sprintf("  %s %s%s%s", glyphReview, pangoEscape(r.Head()),
+					pangoEscape(trimRunes(r.Title, tooltipTitleRunes)), pangoEscape(r.Suffix())))
+			}
 		}
 
 		if len(notifs) > 0 {
@@ -390,7 +410,7 @@ func main() {
 
 		w := waybar.New()
 		w.Text = text
-		if hideEmpty && len(all) == 0 && len(notifs) == 0 && len(pending) == 0 &&
+		if hideEmpty && len(all) == 0 && len(reviews.Requests) == 0 && len(notifs) == 0 && len(pending) == 0 &&
 			!(runs.Complete && len(runs.Runs) > 0) {
 			w.Text = ""
 		}
@@ -412,6 +432,9 @@ func main() {
 		}
 		if len(pending) > 0 {
 			classes = append(classes, "pending")
+		}
+		if len(reviews.Requests) > 0 {
+			classes = append(classes, "review")
 		}
 		if runs.Complete {
 			if len(runningRuns) > 0 {
@@ -652,16 +675,17 @@ func cacheFilePath(scope string) string {
 }
 
 type PRCache struct {
-	All           []PR           `json:"all"`
-	Approved      []PR           `json:"approved"`
-	Notifications []Notification `json:"notifications,omitempty"`
-	Runs          []Run          `json:"runs,omitempty"`
-	Pending       []PendingRoot  `json:"pending,omitempty"`
+	All           []PR            `json:"all"`
+	Approved      []PR            `json:"approved"`
+	Reviews       []ReviewRequest `json:"reviews,omitempty"`
+	Notifications []Notification  `json:"notifications,omitempty"`
+	Runs          []Run           `json:"runs,omitempty"`
+	Pending       []PendingRoot   `json:"pending,omitempty"`
 }
 
-func writePRCache(scope string, all, approved []PR, notifs []Notification, runs []Run, pending []PendingRoot) {
+func writePRCache(scope string, all, approved []PR, reviews []ReviewRequest, notifs []Notification, runs []Run, pending []PendingRoot) {
 	data, err := json.Marshal(PRCache{
-		All: all, Approved: approved, Notifications: notifs, Runs: runs, Pending: pending,
+		All: all, Approved: approved, Reviews: reviews, Notifications: notifs, Runs: runs, Pending: pending,
 	})
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
@@ -818,14 +842,17 @@ func pickerItems(cache PRCache) []item {
 	// Resolved before the PR rows are built rather than patched onto them
 	// afterwards, so a reason is part of the suffix each row is sized around
 	// instead of a tail hung past the window's edge.
-	mine := make(map[string]bool, len(cache.All))
+	listed := make(map[string]bool, len(cache.All)+len(cache.Reviews))
 	for _, pr := range cache.All {
-		mine[pr.URL] = true
+		listed[pr.URL] = true
+	}
+	for _, r := range cache.Reviews {
+		listed[r.URL] = true
 	}
 	reasons := make(map[string]string)
 	var loose []Notification
 	for _, n := range cache.Notifications {
-		if url := subjectWebURL(n); mine[url] {
+		if url := subjectWebURL(n); listed[url] {
 			reasons[url] += " 󰂜 " + n.Reason
 			continue
 		}
@@ -847,6 +874,15 @@ func pickerItems(cache PRCache) []item {
 			label: row(prefix, parseGHTime(pr.CreatedAt),
 				fitText(prHead(pr), pr.Title, suffix)),
 			url: pr.URL,
+		})
+	}
+
+	reviews := section{title: "Review requested"}
+	for _, r := range cache.Reviews {
+		reviews.items = append(reviews.items, item{
+			label: row(glyphReview, parseGHTime(r.UpdatedAt),
+				fitText(r.Head(), r.Title, r.Suffix()+reasons[r.URL])),
+			url: r.URL,
 		})
 	}
 
@@ -900,7 +936,7 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	var populated []section
-	for _, s := range []section{prs, runs, applies, notifs} {
+	for _, s := range []section{prs, reviews, runs, applies, notifs} {
 		if len(s.items) > 0 {
 			populated = append(populated, s)
 		}
