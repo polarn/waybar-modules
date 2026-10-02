@@ -62,12 +62,13 @@ type Notification struct {
 	} `json:"subject"`
 }
 
-// Tracks notification IDs we've already notify-send'd for. Lives for the
+// Tracks the updated_at each notification was last notify-send'd at, so new
+// activity on a thread that is still unread pops up again. Lives for the
 // daemon's lifetime — restart loses state, but that's fine: on first poll
 // after start we baseline (mark all current as seen) so the user doesn't
 // get a startup flood for pre-existing unread items.
 var (
-	seenNotifs      = make(map[string]bool)
+	seenNotifs      = make(map[string]string)
 	notifsBaselined = false
 
 	// Remembers whether a notification's subject PR was merged/closed, keyed
@@ -295,6 +296,11 @@ func main() {
 			reviews = fetchReviews(sc)
 		}
 
+		// Pull notifications, fire notify-send for any new ones, and feed the
+		// filtered count into the pill / tooltip / left-click menu.
+		notifs := processNotifications(notifyReasons, notify, sc)
+		reasons, loose := foldNotifications(all, reviews.Requests, notifs)
+
 		var tooltips []string
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
@@ -307,7 +313,7 @@ func main() {
 			if pr.Queue != nil {
 				line += " · " + pangoEscape(pr.Queue.Summary())
 			}
-			line += commentsSuffix(pr.Comments)
+			line += commentsSuffix(pr.Comments) + pangoEscape(reasons[pr.URL])
 			tooltips = append(tooltips, line)
 		}
 
@@ -316,9 +322,6 @@ func main() {
 			status = "found"
 		}
 
-		// Pull notifications, fire notify-send for any new ones, and feed the
-		// filtered count into the pill / tooltip / left-click menu.
-		notifs := processNotifications(notifyReasons, notify, sc)
 		if !swiftbar {
 			writePRCache(sc.name, all, approved, reviews.Requests, notifs, runs.Runs, pending)
 		}
@@ -363,14 +366,14 @@ func main() {
 			tooltips = append(tooltips, "<b>Review requested</b>")
 			for _, r := range reviews.Requests {
 				tooltips = append(tooltips, fmt.Sprintf("  %s %s%s%s", glyphReview, pangoEscape(r.Head()),
-					pangoEscape(trimRunes(r.Title, tooltipTitleRunes)), pangoEscape(r.Suffix())))
+					pangoEscape(trimRunes(r.Title, tooltipTitleRunes)), pangoEscape(r.Suffix()+reasons[r.URL])))
 			}
 		}
 
-		if len(notifs) > 0 {
+		if len(loose) > 0 {
 			tooltips = append(tooltips, "")
 			tooltips = append(tooltips, "<b>Notifications</b>")
-			for _, n := range notifs {
+			for _, n := range loose {
 				tooltips = append(tooltips, fmt.Sprintf("  [%s] %s · %s", pangoEscape(n.Reason),
 					pangoEscape(n.Repository.FullName), pangoEscape(trimRunes(n.Subject.Title, tooltipTitleRunes))))
 			}
@@ -517,21 +520,53 @@ func processNotifications(reasons map[string]bool, notify bool, sc scope) []Noti
 	if !notify {
 		return filtered
 	}
-	if !notifsBaselined {
-		for _, n := range filtered {
-			seenNotifs[n.ID] = true
-		}
-		notifsBaselined = true
-		return filtered
-	}
-	for _, n := range filtered {
-		if seenNotifs[n.ID] {
-			continue
-		}
-		seenNotifs[n.ID] = true
+	for _, n := range toAnnounce(filtered) {
 		notifySendForGitHub(n)
 	}
 	return filtered
+}
+
+func toAnnounce(ns []Notification) []Notification {
+	if !notifsBaselined {
+		for _, n := range ns {
+			seenNotifs[n.ID] = n.UpdatedAt
+		}
+		notifsBaselined = true
+		return nil
+	}
+	var fresh []Notification
+	for _, n := range ns {
+		if seenNotifs[n.ID] == n.UpdatedAt {
+			continue
+		}
+		seenNotifs[n.ID] = n.UpdatedAt
+		fresh = append(fresh, n)
+	}
+	return fresh
+}
+
+// foldNotifications splits notifications into reasons keyed by the URL of a
+// listed PR or review request, and the rest. A notification about your own PR
+// names a PR that is already listed, so the two queries overlap and the same
+// thing would be shown twice; its reason goes on the PR's own line instead.
+func foldNotifications(prs []PR, reviews []ReviewRequest, notifs []Notification) (map[string]string, []Notification) {
+	listed := make(map[string]bool, len(prs)+len(reviews))
+	for _, pr := range prs {
+		listed[pr.URL] = true
+	}
+	for _, r := range reviews {
+		listed[r.URL] = true
+	}
+	reasons := make(map[string]string)
+	var loose []Notification
+	for _, n := range notifs {
+		if url := subjectWebURL(n); listed[url] {
+			reasons[url] += " " + glyphNotif + " " + n.Reason
+			continue
+		}
+		loose = append(loose, n)
+	}
+	return reasons, loose
 }
 
 // subjectIsDone reports whether a PullRequest notification points at a PR
@@ -718,6 +753,8 @@ const pickerWidth = 120
 
 const pickerMaxLines = 40
 
+const glyphNotif = "\U000f009c"
+
 type item struct {
 	label string
 	url   string
@@ -837,30 +874,10 @@ func openPRs(scope string) {
 // order they appear: open PRs, workflow runs, roots pending apply, then
 // notifications, each group after the first introduced by a divider.
 func pickerItems(cache PRCache) []item {
-	// A notification about your own PR names a PR that is already in the
-	// open-PR list, so the two queries overlap and the same thing would be
-	// offered twice. Fold those reasons into the PR's own row and keep only
-	// the rest as rows of their own.
-	//
 	// Resolved before the PR rows are built rather than patched onto them
 	// afterwards, so a reason is part of the suffix each row is sized around
 	// instead of a tail hung past the window's edge.
-	listed := make(map[string]bool, len(cache.All)+len(cache.Reviews))
-	for _, pr := range cache.All {
-		listed[pr.URL] = true
-	}
-	for _, r := range cache.Reviews {
-		listed[r.URL] = true
-	}
-	reasons := make(map[string]string)
-	var loose []Notification
-	for _, n := range cache.Notifications {
-		if url := subjectWebURL(n); listed[url] {
-			reasons[url] += " 󰂜 " + n.Reason
-			continue
-		}
-		loose = append(loose, n)
-	}
+	reasons, loose := foldNotifications(cache.All, cache.Reviews, cache.Notifications)
 
 	prs := section{title: "Pull requests"}
 	for _, pr := range cache.All {
