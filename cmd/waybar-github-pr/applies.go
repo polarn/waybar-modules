@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const glyphApply = "\U000f0167"
+
 // PendingRoot is a terraform root that has landed on main but has not been
 // applied since. In validio-internal/infra merging deliberately applies
 // nothing — the README's recipe ends "Actions → Terraform apply → Run
@@ -517,17 +519,35 @@ func notifyPending(pending []PendingRoot, enabled bool) {
 	}
 }
 
-// dispatchApply starts the apply workflow for one root. This only ever gets
+// dispatchApplies starts the apply workflow for each root. This only ever gets
 // as far as a plan: the workflow's apply job sits behind the `apply`
 // environment's required reviewers, which the pill surfaces separately. So a
 // mis-selection costs a plan, never a deploy.
-func dispatchApply(p PendingRoot) {
-	cmd := ghCommand("workflow", "run", p.Workflow, "--repo", p.Repo, "-f", "root="+p.Root)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("Error dispatching apply for %s: %s: %s", p.Root, err, strings.TrimSpace(string(out)))
-		notifySend("Terraform apply dispatch failed", fmt.Sprintf("[%s] %s", p.Repo, p.Root))
+func dispatchApplies(ps []PendingRoot) {
+	if len(ps) == 0 {
 		return
 	}
-	notifySend("Terraform apply dispatched",
-		fmt.Sprintf("[%s] %s · waiting for the plan", p.Repo, p.Root))
+	var ok, failed []string
+	for _, p := range ps {
+		cmd := ghCommand("workflow", "run", p.Workflow, "--repo", p.Repo, "-f", "root="+p.Root)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("Error dispatching apply for %s: %s: %s", p.Root, err, strings.TrimSpace(string(out)))
+			failed = append(failed, p.Root)
+			continue
+		}
+		ok = append(ok, p.Root)
+	}
+	repo := ps[0].Repo
+	if len(failed) > 0 {
+		notifySend("Terraform apply dispatch failed",
+			fmt.Sprintf("[%s] %s", repo, strings.Join(failed, ", ")))
+	}
+	if len(ok) > 0 {
+		waiting := "the plan"
+		if len(ok) > 1 {
+			waiting = "the plans"
+		}
+		notifySend("Terraform apply dispatched",
+			fmt.Sprintf("[%s] %s · waiting for %s", repo, strings.Join(ok, ", "), waiting))
+	}
 }

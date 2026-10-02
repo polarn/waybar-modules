@@ -716,15 +716,18 @@ func subjectWebURL(n Notification) string {
 // which repo the row belongs to.
 const pickerWidth = 120
 
+const pickerMaxLines = 40
+
 type item struct {
 	label string
 	url   string
 	// Non-zero for a failed run: opening it is also how you acknowledge
 	// it, which is what stops the daemon resurfacing it next tick.
 	dismiss int64
-	// Set for a root pending apply. Selecting it starts the workflow
-	// rather than opening a page, so it is a side effect, not a link.
-	dispatch *PendingRoot
+	// Set for a root pending apply, or for all of them on the apply-all row.
+	// Selecting it starts the workflow rather than opening a page, so it is a
+	// side effect, not a link.
+	dispatch []PendingRoot
 	// A labelled rule introducing a group. dmenu has no notion of an inert
 	// line, so selecting one re-opens the picker instead of acting.
 	divider bool
@@ -822,7 +825,7 @@ func openPRs(scope string) {
 			continue
 		}
 		if it.dispatch != nil {
-			dispatchApply(*it.dispatch)
+			dispatchApplies(it.dispatch)
 			return
 		}
 		openItem(it.url, it.dismiss)
@@ -914,14 +917,20 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	applies := section{title: "Needs terraform apply"}
-	for i := range cache.Pending {
-		p := cache.Pending[i]
+	for _, p := range cache.Pending {
 		applies.items = append(applies.items, item{
-			label: row("󰅧", parseGHTime(p.NewestWhen),
+			label: row(glyphApply, parseGHTime(p.NewestWhen),
 				fitText(fmt.Sprintf("[%s] ", p.Repo), p.Root,
 					fmt.Sprintf(" · needs apply (%d commit(s))", p.Commits))),
 			url:      p.CompareURL,
-			dispatch: &p,
+			dispatch: []PendingRoot{p},
+		})
+	}
+	if n := len(cache.Pending); n > 1 {
+		applies.items = append(applies.items, item{
+			label: row(glyphApply, time.Time{},
+				fmt.Sprintf("[%s] all %d roots · dispatch every apply", cache.Pending[0].Repo, n)),
+			dispatch: cache.Pending,
 		})
 	}
 
@@ -977,8 +986,9 @@ func pick(items []item) (item, bool) {
 		entries = append(entries, it.label)
 	}
 
+	lines := min(len(items), pickerMaxLines)
 	cmd := exec.Command("fuzzel", "--dmenu", "--index",
-		fmt.Sprintf("--width=%d", pickerWidth), "--prompt", "GitHub > ")
+		fmt.Sprintf("--width=%d", pickerWidth), fmt.Sprintf("--lines=%d", lines), "--prompt", "GitHub > ")
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {

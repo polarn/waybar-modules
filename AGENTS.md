@@ -201,7 +201,7 @@ Two rules the render obeys. Runs are garnish on a PR pill, so nothing in the run
 
 ### Terraform roots pending apply
 
-Optional fourth state (`--apply-repo`, off by default), built for `validio-internal/infra`, where **merging deliberately applies nothing** — the README's recipe ends "Actions → Terraform apply → Run workflow → pick the root", and that step is unenforced. The pill tracks which roots have landed on `main` without being applied since. Picking one in the picker **dispatches the apply**; that only ever reaches a plan, because the workflow's apply job sits behind the `apply` environment's required reviewers.
+Optional fourth state (`--apply-repo`, off by default), built for `validio-internal/infra`, where **merging deliberately applies nothing** — the README's recipe ends "Actions → Terraform apply → Run workflow → pick the root", and that step is unenforced. The pill tracks which roots have landed on `main` without being applied since. Picking one in the picker **dispatches the apply**; that only ever reaches a plan, because the workflow's apply job sits behind the `apply` environment's required reviewers. With more than one root pending, the section ends with an apply-all row that dispatches every listed root and sends one notification for the lot. It goes last so it can never be the row fuzzel opens on.
 
 The whole difficulty is that "files changed since the last apply" is not the same question as "does this need applying", and the naive version is badly wrong in practice. Infra PR #7 touched 25 `.tf` files across 25 roots to repoint wiki URLs at the handbook: every hunk was a comment, `index = 2` was untouched, and the correct answer was zero roots. So:
 

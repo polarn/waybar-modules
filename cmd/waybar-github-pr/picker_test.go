@@ -99,6 +99,50 @@ func TestPickerItems(t *testing.T) {
 			t.Errorf("PR row %q shows a count for a PR with no comments", items[1].label)
 		}
 	})
+
+	t.Run("each pending root dispatches only itself", func(t *testing.T) {
+		items := pickerItems(PRCache{Pending: []PendingRoot{{Root: "aws/dev", Repo: "o/infra", Commits: 1}}})
+		if len(items) != 1 {
+			t.Fatalf("got %d rows for one pending root, want 1 (no apply-all row)", len(items))
+		}
+		if d := items[0].dispatch; len(d) != 1 || d[0].Root != "aws/dev" {
+			t.Errorf("root row dispatches %v, want aws/dev alone", d)
+		}
+	})
+
+	t.Run("several pending roots end with an apply-all row", func(t *testing.T) {
+		roots := []string{"aws/dev", "aws/prod", "google/customers-uat"}
+		var pending []PendingRoot
+		for _, r := range roots {
+			pending = append(pending, PendingRoot{Root: r, Repo: "o/infra", Commits: 1})
+		}
+		items := pickerItems(PRCache{All: []PR{pr}, Pending: pending})
+
+		last := items[len(items)-1]
+		if len(last.dispatch) != len(roots) {
+			t.Fatalf("last row %q dispatches %d roots, want all %d", last.label, len(last.dispatch), len(roots))
+		}
+		for i, r := range roots {
+			if last.dispatch[i].Root != r {
+				t.Errorf("apply-all dispatch[%d] = %q, want %q", i, last.dispatch[i].Root, r)
+			}
+		}
+		if !strings.Contains(last.label, "all 3 roots") {
+			t.Errorf("apply-all row %q does not say how many roots it dispatches", last.label)
+		}
+		if len(items[0].dispatch) != 0 {
+			t.Error("first row dispatches; Enter on fuzzel's default selection would start an apply")
+		}
+		var single int
+		for _, it := range items[:len(items)-1] {
+			if len(it.dispatch) == 1 {
+				single++
+			}
+		}
+		if single != len(roots) {
+			t.Errorf("got %d single-root rows, want %d", single, len(roots))
+		}
+	})
 }
 
 func TestDividerFitsPickerWidth(t *testing.T) {
