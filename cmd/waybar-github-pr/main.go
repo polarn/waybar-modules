@@ -653,6 +653,7 @@ func fetchPRs(review string) ([]PR, error) {
 		"--state=open",
 		"--author=@me",
 		"--json=title,url,number,repository,createdAt,isDraft",
+		"--limit=100",
 	}
 	if review != "" {
 		args = append(args, "--review="+review)

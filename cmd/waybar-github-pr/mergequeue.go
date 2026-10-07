@@ -130,11 +130,11 @@ type prFacts struct {
 // a bounced merge must not be forgotten because of that.
 //
 // `gh search prs` cannot answer any of it: its --json field set has no
-// merge-queue member, hence GraphQL. first: 50 is well clear of the handful
-// of PRs one person has open, and matches the search fetchPRs runs.
+// merge-queue member, hence GraphQL. first: 100 is the most one page returns
+// and matches fetchPRs' --limit.
 const factsQuery = `
 {
-  search(query: "is:open is:pr author:@me", type: ISSUE, first: 50) {
+  search(query: "is:open is:pr author:@me", type: ISSUE, first: 100) {
     nodes {
       ... on PullRequest {
         url
