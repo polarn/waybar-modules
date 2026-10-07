@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,7 @@ var (
 func main() {
 	var interval int
 	var open bool
+	var hideTitles string
 	var notify bool
 	var swiftbar bool
 	var notifyReasonsCSV string
@@ -109,6 +111,8 @@ func main() {
 	flag.BoolVar(&hideEmpty, "hide-empty", false,
 		"Print empty text, which hides the pill, when nothing is open or pending")
 	flag.BoolVar(&open, "open", false, "Open PRs interactively and exit")
+	flag.StringVar(&hideTitles, "hide-titles", "",
+		"With --open, leave out PRs (and their notifications) whose title matches this regexp")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
 	flag.BoolVar(&swiftbar, "swiftbar", false, "Emit SwiftBar streamable format instead of waybar JSON (implies --notify=false)")
 	flag.StringVar(&notifyReasonsCSV, "notify-reasons",
@@ -155,7 +159,15 @@ func main() {
 	}
 
 	if open {
-		openPRs(sc.name)
+		var hide *regexp.Regexp
+		if hideTitles != "" {
+			re, err := regexp.Compile(hideTitles)
+			if err != nil {
+				log.Fatalf("--hide-titles: %s", err)
+			}
+			hide = re
+		}
+		openPRs(sc.name, hide)
 		return
 	}
 
@@ -843,7 +855,7 @@ func divider(title string) string {
 // openPRs opens a fuzzel picker that merges the cached open PRs with any
 // unread notifications, workflow runs and roots pending apply. Selecting an
 // entry opens the relevant URL in the default browser.
-func openPRs(scope string) {
+func openPRs(scope string, hide *regexp.Regexp) {
 	data, err := os.ReadFile(cacheFilePath(scope))
 	if err != nil {
 		log.Printf("No cached items: %s", err)
@@ -854,6 +866,12 @@ func openPRs(scope string) {
 	if err := json.Unmarshal(data, &cache); err != nil {
 		log.Printf("Error reading cache: %s", err)
 		return
+	}
+
+	cache, hidden := withoutTitles(cache, hide)
+	prompt := "GitHub > "
+	if hidden > 0 {
+		prompt = fmt.Sprintf("GitHub · %d hidden > ", hidden)
 	}
 
 	items := pickerItems(cache)
@@ -872,7 +890,7 @@ func openPRs(scope string) {
 	}
 
 	for {
-		it, ok := pick(items)
+		it, ok := pick(items, prompt)
 		if !ok {
 			return // cancelled, or typed something that matched nothing
 		}
@@ -886,6 +904,38 @@ func openPRs(scope string) {
 		openItem(it.url, it.dismiss)
 		return
 	}
+}
+
+func withoutTitles(cache PRCache, hide *regexp.Regexp) (PRCache, int) {
+	if hide == nil {
+		return cache, 0
+	}
+	gone := make(map[string]bool)
+	var all []PR
+	for _, pr := range cache.All {
+		if hide.MatchString(pr.Title) {
+			gone[pr.URL] = true
+			continue
+		}
+		all = append(all, pr)
+	}
+	var reviews []ReviewRequest
+	for _, r := range cache.Reviews {
+		if hide.MatchString(r.Title) {
+			gone[r.URL] = true
+			continue
+		}
+		reviews = append(reviews, r)
+	}
+	var notifs []Notification
+	for _, n := range cache.Notifications {
+		if gone[subjectWebURL(n)] || (n.Subject.Type == "PullRequest" && hide.MatchString(n.Subject.Title)) {
+			continue
+		}
+		notifs = append(notifs, n)
+	}
+	cache.All, cache.Reviews, cache.Notifications = all, reviews, notifs
+	return cache, len(gone)
 }
 
 // pickerItems turns one poll's cache into the rows the picker offers, in the
@@ -1025,7 +1075,7 @@ func prHead(pr PR) string {
 }
 
 // pick shows the menu and returns the chosen item.
-func pick(items []item) (item, bool) {
+func pick(items []item, prompt string) (item, bool) {
 	entries := make([]string, 0, len(items))
 	for _, it := range items {
 		entries = append(entries, it.label)
@@ -1033,7 +1083,7 @@ func pick(items []item) (item, bool) {
 
 	lines := min(len(items), pickerMaxLines)
 	cmd := exec.Command("fuzzel", "--dmenu", "--index",
-		fmt.Sprintf("--width=%d", pickerWidth), fmt.Sprintf("--lines=%d", lines), "--prompt", "GitHub > ")
+		fmt.Sprintf("--width=%d", pickerWidth), fmt.Sprintf("--lines=%d", lines), "--prompt", prompt)
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {

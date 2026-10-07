@@ -162,6 +162,8 @@ The polling loop writes the current PR list to `$XDG_RUNTIME_DIR/waybar-github-p
 
 Waybar config wires this up via `"on-click": "waybar-github-pr --open --scope=<scope>"`, in chezmoi's `dot_config/waybar/modules/github.jsonc`.
 
+`--hide-titles=<regexp>` leaves PRs and review requests whose title matches out of the picker, along with notifications about them (otherwise a hidden PR's `author` notification would fall through to the Notifications group). The prompt says how many were hidden. Left-click passes it to skip mass-produced PRs (`Add CODEOWNERS`); right-click doesn't, and shows everything. The pill text and tooltip are not filtered.
+
 The PR list and the notification list are independent queries that overlap: a notification with reason `author`/`assign`/`comment` names a PR that is usually already in your open-PR list, so the picker offered the same thing twice. Notifications are matched against the PR entries by resolved web URL (`subjectWebURL` turns `/repos/O/R/pulls/N` into `/O/R/pull/N`, which is exactly what `gh search prs --json url` returns) and folded onto the existing row as a trailing bell plus reason, rather than dropped — the reason is the part worth keeping. The tooltip folds the same way (`foldNotifications`), while the pill's bell count still includes every unread notification.
 
 GitHub never updates a thread's `reason`, so a `review_requested` thread goes unread again with that reason on any later activity (a merge-queue add, a push) after the review is done. When the review-request search succeeded, a `review_requested` notification whose PR it doesn't list is dropped before notify-send and the count; if the search failed, it is kept.

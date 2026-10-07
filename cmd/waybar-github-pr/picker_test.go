@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -236,5 +237,54 @@ func TestResolve(t *testing.T) {
 		if _, ok := resolve(items, out); ok {
 			t.Errorf("resolve(%q) reported a selection", out)
 		}
+	}
+}
+
+func TestWithoutTitles(t *testing.T) {
+	mk := func(n int, title string) PR {
+		pr := PR{Title: title, URL: fmt.Sprintf("https://github.com/o/r/pull/%d", n)}
+		pr.Repository.NameWithOwner = "o/r"
+		return pr
+	}
+	notif := func(reason, pull, title string) Notification {
+		var n Notification
+		n.Reason = reason
+		n.Subject.Type = "PullRequest"
+		n.Subject.Title = title
+		n.Subject.URL = "https://api.github.com/repos/o/r/pulls/" + pull
+		return n
+	}
+	cache := PRCache{
+		All: []PR{mk(1, "chore: [PL-5117] Add CODEOWNERS"), mk(2, "fix: keep me")},
+		Reviews: []ReviewRequest{
+			{Title: "Add CODEOWNERS", URL: "https://github.com/o/r/pull/3"},
+			{Title: "review me", URL: "https://github.com/o/r/pull/4"},
+		},
+		Notifications: []Notification{
+			notif("author", "1", "renamed since"),
+			notif("mention", "5", "chore: Add CODEOWNERS"),
+			notif("mention", "6", "something else"),
+		},
+	}
+
+	if got, n := withoutTitles(cache, nil); n != 0 || len(got.All) != 2 {
+		t.Fatalf("nil regexp hid %d PRs, kept %d of 2", n, len(got.All))
+	}
+
+	got, hidden := withoutTitles(cache, regexp.MustCompile("Add CODEOWNERS"))
+	if hidden != 2 {
+		t.Errorf("hidden = %d, want 2 (one PR, one review request)", hidden)
+	}
+	if len(got.All) != 1 || got.All[0].Title != "fix: keep me" {
+		t.Errorf("All = %+v, want only the unmatched PR", got.All)
+	}
+	if len(got.Reviews) != 1 || got.Reviews[0].Title != "review me" {
+		t.Errorf("Reviews = %+v, want only the unmatched request", got.Reviews)
+	}
+	if len(got.Notifications) != 1 || got.Notifications[0].Subject.Title != "something else" {
+		t.Errorf("Notifications = %+v, want only the one about an unhidden PR", got.Notifications)
+	}
+	if len(cache.All) != 2 {
+		t.Error("withoutTitles modified the cache it was given")
 	}
 }
