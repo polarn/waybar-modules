@@ -100,16 +100,32 @@ func TestPickerItems(t *testing.T) {
 		}
 	})
 
-	t.Run("a draft PR is marked even when approved", func(t *testing.T) {
+	t.Run("drafts get their own group below my PRs", func(t *testing.T) {
 		draft := pr
 		draft.IsDraft = true
 		draft.URL = "https://github.com/o/r/pull/2"
 		items := pickerItems(PRCache{All: []PR{draft, pr}, Approved: []PR{draft}})
-		if !strings.HasPrefix(items[0].label, glyphDraft+" ") {
-			t.Errorf("draft row %q does not start with %s", items[0].label, glyphDraft)
+		if len(items) != 3 {
+			t.Fatalf("got %d rows, want PR, divider, draft", len(items))
 		}
-		if !strings.HasPrefix(items[1].label, "○ ") {
-			t.Errorf("ready row %q does not start with ○", items[1].label)
+		if items[0].url != pr.URL || !strings.HasPrefix(items[0].label, "○ ") {
+			t.Errorf("first row %q is not the ready PR", items[0].label)
+		}
+		if !items[1].divider || !strings.Contains(items[1].label, "Drafts") {
+			t.Errorf("second row %q is not the Drafts divider", items[1].label)
+		}
+		if items[2].url != draft.URL || !strings.HasPrefix(items[2].label, glyphDraft+" ") {
+			t.Errorf("draft row %q does not start with %s even though approved", items[2].label, glyphDraft)
+		}
+	})
+
+	t.Run("drafts alone lead without a divider and keep their glyph", func(t *testing.T) {
+		draft := pr
+		draft.IsDraft = true
+		items := pickerItems(PRCache{All: []PR{draft},
+			Runs: []Run{{ID: 7, Repo: "o/r", DisplayTitle: "build", Status: "in_progress"}}})
+		if items[0].divider || !strings.HasPrefix(items[0].label, glyphDraft+" ") {
+			t.Errorf("first row %q is not the draft", items[0].label)
 		}
 	})
 

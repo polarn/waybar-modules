@@ -302,7 +302,7 @@ func main() {
 		notifs := processNotifications(notifyReasons, notify, sc)
 		reasons, loose := foldNotifications(all, reviews.Requests, notifs)
 
-		var tooltips []string
+		var tooltips, draftTips []string
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
 			prefix := "  "
@@ -318,7 +318,15 @@ func main() {
 				line += " · " + pangoEscape(pr.Queue.Summary())
 			}
 			line += commentsSuffix(pr.Comments) + pangoEscape(reasons[pr.URL])
-			tooltips = append(tooltips, line)
+			if pr.IsDraft {
+				draftTips = append(draftTips, line)
+			} else {
+				tooltips = append(tooltips, line)
+			}
+		}
+		if len(draftTips) > 0 {
+			tooltips = append(tooltips, "", "<b>Drafts</b>")
+			tooltips = append(tooltips, draftTips...)
 		}
 
 		status := "none"
@@ -877,8 +885,9 @@ func openPRs(scope string) {
 }
 
 // pickerItems turns one poll's cache into the rows the picker offers, in the
-// order they appear: open PRs, workflow runs, roots pending apply, then
-// notifications, each group after the first introduced by a divider.
+// order they appear: open PRs, drafts, review requests, workflow runs, roots
+// pending apply, then notifications, each group after the first introduced by
+// a divider.
 func pickerItems(cache PRCache) []item {
 	// Resolved before the PR rows are built rather than patched onto them
 	// afterwards, so a reason is part of the suffix each row is sized around
@@ -886,6 +895,7 @@ func pickerItems(cache PRCache) []item {
 	reasons, loose := foldNotifications(cache.All, cache.Reviews, cache.Notifications)
 
 	prs := section{title: "Pull requests"}
+	drafts := section{title: "Drafts"}
 	for _, pr := range cache.All {
 		prefix := "○"
 		switch {
@@ -899,11 +909,16 @@ func pickerItems(cache PRCache) []item {
 			suffix = " · " + pr.Queue.Summary()
 		}
 		suffix += commentsSuffix(pr.Comments) + reasons[pr.URL]
-		prs.items = append(prs.items, item{
+		it := item{
 			label: row(prefix, parseGHTime(pr.CreatedAt),
 				fitText(prHead(pr), pr.Title, suffix)),
 			url: pr.URL,
-		})
+		}
+		if pr.IsDraft {
+			drafts.items = append(drafts.items, it)
+		} else {
+			prs.items = append(prs.items, it)
+		}
 	}
 
 	reviews := section{title: "Review requested"}
@@ -971,7 +986,7 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	var populated []section
-	for _, s := range []section{prs, reviews, runs, applies, notifs} {
+	for _, s := range []section{prs, drafts, reviews, runs, applies, notifs} {
 		if len(s.items) > 0 {
 			populated = append(populated, s)
 		}
