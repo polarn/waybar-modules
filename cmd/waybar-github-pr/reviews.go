@@ -38,6 +38,19 @@ type reviewsResult struct {
 	Complete bool
 }
 
+func (r reviewsResult) stale(n Notification) bool {
+	if n.Reason != "review_requested" || !r.Complete {
+		return false
+	}
+	url := subjectWebURL(n)
+	for _, req := range r.Requests {
+		if req.URL == url {
+			return false
+		}
+	}
+	return true
+}
+
 const reviewsQuery = `
 {
   viewer { login }

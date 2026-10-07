@@ -299,7 +299,7 @@ func main() {
 
 		// Pull notifications, fire notify-send for any new ones, and feed the
 		// filtered count into the pill / tooltip / left-click menu.
-		notifs := processNotifications(notifyReasons, notify, sc)
+		notifs := processNotifications(notifyReasons, notify, sc, reviews)
 		reasons, loose := foldNotifications(all, reviews.Requests, notifs)
 
 		var tooltips, draftTips []string
@@ -507,7 +507,7 @@ func fetchNotifications() ([]Notification, error) {
 // daemon doesn't spam notify-send for everything sitting unread on startup),
 // and fires notify-send for genuinely new notifications. Returns the filtered
 // set so the caller can display a count and tooltip.
-func processNotifications(reasons map[string]bool, notify bool, sc scope) []Notification {
+func processNotifications(reasons map[string]bool, notify bool, sc scope, reviews reviewsResult) []Notification {
 	all, err := fetchNotifications()
 	if err != nil {
 		log.Printf("notifications: %s", err)
@@ -522,6 +522,9 @@ func processNotifications(reasons map[string]bool, notify bool, sc scope) []Noti
 			continue
 		}
 		if !sc.keeps(n.Repository.FullName) {
+			continue
+		}
+		if reviews.stale(n) {
 			continue
 		}
 		if subjectIsDone(n) {

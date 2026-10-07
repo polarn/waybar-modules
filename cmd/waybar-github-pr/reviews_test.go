@@ -71,3 +71,32 @@ func TestPickerReviews(t *testing.T) {
 		t.Errorf("review row opens %q, want %q", items[0].url, r.URL)
 	}
 }
+
+func TestStaleReviewRequest(t *testing.T) {
+	notif := func(reason, pull string) Notification {
+		var n Notification
+		n.Reason = reason
+		n.Subject.URL = "https://api.github.com/repos/validio-internal/redis/pulls/" + pull
+		return n
+	}
+	listed := reviewsResult{Complete: true, Requests: []ReviewRequest{
+		{URL: "https://github.com/validio-internal/redis/pull/8"},
+	}}
+
+	cases := []struct {
+		name    string
+		reviews reviewsResult
+		n       Notification
+		want    bool
+	}{
+		{"still requested", listed, notif("review_requested", "8"), false},
+		{"already reviewed", listed, notif("review_requested", "7"), true},
+		{"search failed", reviewsResult{}, notif("review_requested", "7"), false},
+		{"other reason", listed, notif("mention", "7"), false},
+	}
+	for _, c := range cases {
+		if got := c.reviews.stale(c.n); got != c.want {
+			t.Errorf("%s: stale = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
