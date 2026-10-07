@@ -100,6 +100,19 @@ func TestPickerItems(t *testing.T) {
 		}
 	})
 
+	t.Run("a draft PR is marked even when approved", func(t *testing.T) {
+		draft := pr
+		draft.IsDraft = true
+		draft.URL = "https://github.com/o/r/pull/2"
+		items := pickerItems(PRCache{All: []PR{draft, pr}, Approved: []PR{draft}})
+		if !strings.HasPrefix(items[0].label, glyphDraft+" ") {
+			t.Errorf("draft row %q does not start with %s", items[0].label, glyphDraft)
+		}
+		if !strings.HasPrefix(items[1].label, "○ ") {
+			t.Errorf("ready row %q does not start with ○", items[1].label)
+		}
+	})
+
 	t.Run("each pending root dispatches only itself", func(t *testing.T) {
 		items := pickerItems(PRCache{Pending: []PendingRoot{{Root: "aws/dev", Repo: "o/infra", Commits: 1}}})
 		if len(items) != 1 {

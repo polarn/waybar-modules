@@ -20,6 +20,7 @@ type PR struct {
 	URL        string     `json:"url"`
 	Number     int        `json:"number"`
 	CreatedAt  string     `json:"createdAt"`
+	IsDraft    bool       `json:"isDraft"`
 	Repository Repository `json:"repository"`
 
 	// Resolved separately and joined on by URL — the PR search reports
@@ -305,7 +306,10 @@ func main() {
 		for _, pr := range all {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
 			prefix := "  "
-			if isApproved(pr, approved) {
+			switch {
+			case pr.IsDraft:
+				prefix = glyphDraft + " "
+			case isApproved(pr, approved):
 				prefix = "✓ "
 			}
 			line := fmt.Sprintf("%s[%s] %s", prefix,
@@ -637,7 +641,7 @@ func fetchPRs(review string) ([]PR, error) {
 	args := []string{"search", "prs",
 		"--state=open",
 		"--author=@me",
-		"--json=title,url,number,repository,createdAt",
+		"--json=title,url,number,repository,createdAt,isDraft",
 	}
 	if review != "" {
 		args = append(args, "--review="+review)
@@ -754,6 +758,8 @@ const pickerWidth = 120
 const pickerMaxLines = 40
 
 const glyphNotif = "\U000f009c"
+
+const glyphDraft = "◌"
 
 type item struct {
 	label string
@@ -882,7 +888,10 @@ func pickerItems(cache PRCache) []item {
 	prs := section{title: "Pull requests"}
 	for _, pr := range cache.All {
 		prefix := "○"
-		if isApproved(pr, cache.Approved) {
+		switch {
+		case pr.IsDraft:
+			prefix = glyphDraft
+		case isApproved(pr, cache.Approved):
 			prefix = "✓"
 		}
 		suffix := ""
