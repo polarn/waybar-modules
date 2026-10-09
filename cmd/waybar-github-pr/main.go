@@ -326,6 +326,7 @@ func main() {
 			}
 			line := fmt.Sprintf("%s[%s] %s", prefix,
 				pangoEscape(pr.Repository.NameWithOwner), pangoEscape(trimRunes(pr.Title, tooltipTitleRunes)))
+			line += draftApproval(pr, approved)
 			if pr.Queue != nil {
 				line += " · " + pangoEscape(pr.Queue.Summary())
 			}
@@ -726,6 +727,13 @@ func isApproved(pr PR, approved []PR) bool {
 	return false
 }
 
+func draftApproval(pr PR, approved []PR) string {
+	if pr.IsDraft && isApproved(pr, approved) {
+		return " · approved"
+	}
+	return ""
+}
+
 func cacheFilePath(scope string) string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
@@ -958,9 +966,9 @@ func pickerItems(cache PRCache) []item {
 		case isApproved(pr, cache.Approved):
 			prefix = "✓"
 		}
-		suffix := ""
+		suffix := draftApproval(pr, cache.Approved)
 		if pr.Queue != nil {
-			suffix = " · " + pr.Queue.Summary()
+			suffix += " · " + pr.Queue.Summary()
 		}
 		suffix += commentsSuffix(pr.Comments) + reasons[pr.URL]
 		it := item{
