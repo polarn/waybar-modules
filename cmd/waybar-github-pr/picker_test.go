@@ -115,34 +115,37 @@ func TestPickerItems(t *testing.T) {
 		if !items[1].divider || !strings.Contains(items[1].label, "Drafts") {
 			t.Errorf("second row %q is not the Drafts divider", items[1].label)
 		}
-		if items[2].url != draft.URL || !strings.HasPrefix(items[2].label, glyphDraft+" ") {
-			t.Errorf("draft row %q does not start with %s even though approved", items[2].label, glyphDraft)
-		}
-		if !strings.HasSuffix(items[2].label, " · approved") {
-			t.Errorf("approved draft row %q does not say it is approved", items[2].label)
+		if items[2].url != draft.URL || !strings.HasPrefix(items[2].label, "✓ ") {
+			t.Errorf("approved draft row %q does not start with ✓", items[2].label)
 		}
 	})
 
-	t.Run("only an approved draft says approved", func(t *testing.T) {
+	t.Run("an unapproved draft keeps its own glyph", func(t *testing.T) {
 		draft := pr
 		draft.IsDraft = true
 		draft.URL = "https://github.com/o/r/pull/2"
 		items := pickerItems(PRCache{All: []PR{pr, draft}, Approved: []PR{pr}})
-		if !strings.HasPrefix(items[0].label, "✓ ") || strings.Contains(items[0].label, "approved") {
-			t.Errorf("approved ready PR row %q should carry ✓ and no suffix", items[0].label)
+		if !strings.HasPrefix(items[0].label, "✓ ") {
+			t.Errorf("approved ready PR row %q does not start with ✓", items[0].label)
 		}
-		if strings.Contains(items[2].label, "approved") {
-			t.Errorf("unapproved draft row %q says approved", items[2].label)
+		if !strings.HasPrefix(items[2].label, glyphDraft+" ") {
+			t.Errorf("unapproved draft row %q does not start with %s", items[2].label, glyphDraft)
 		}
 	})
 
-	t.Run("drafts alone lead without a divider and keep their glyph", func(t *testing.T) {
+	t.Run("drafts alone still get their divider, and fuzzel opens below it", func(t *testing.T) {
 		draft := pr
 		draft.IsDraft = true
-		items := pickerItems(PRCache{All: []PR{draft},
+		items := pickerItems(PRCache{All: []PR{draft}, Approved: []PR{draft},
 			Runs: []Run{{ID: 7, Repo: "o/r", DisplayTitle: "build", Status: "in_progress"}}})
-		if items[0].divider || !strings.HasPrefix(items[0].label, glyphDraft+" ") {
-			t.Errorf("first row %q is not the draft", items[0].label)
+		if !items[0].divider || !strings.Contains(items[0].label, "Drafts") {
+			t.Errorf("first row %q is not the Drafts divider", items[0].label)
+		}
+		if !strings.HasPrefix(items[1].label, "✓ ") {
+			t.Errorf("approved draft row %q does not start with ✓", items[1].label)
+		}
+		if got := firstAction(items); got != 1 {
+			t.Errorf("fuzzel would open on row %d, want the draft at 1", got)
 		}
 	})
 

@@ -319,14 +319,13 @@ func main() {
 			log.Printf("%s: %s - %s", pr.Repository.NameWithOwner, pr.Title, pr.URL)
 			prefix := "  "
 			switch {
-			case pr.IsDraft:
-				prefix = glyphDraft + " "
 			case isApproved(pr, approved):
 				prefix = "✓ "
+			case pr.IsDraft:
+				prefix = glyphDraft + " "
 			}
 			line := fmt.Sprintf("%s[%s] %s", prefix,
 				pangoEscape(pr.Repository.NameWithOwner), pangoEscape(trimRunes(pr.Title, tooltipTitleRunes)))
-			line += draftApproval(pr, approved)
 			if pr.Queue != nil {
 				line += " · " + pangoEscape(pr.Queue.Summary())
 			}
@@ -727,13 +726,6 @@ func isApproved(pr PR, approved []PR) bool {
 	return false
 }
 
-func draftApproval(pr PR, approved []PR) string {
-	if pr.IsDraft && isApproved(pr, approved) {
-		return " · approved"
-	}
-	return ""
-}
-
 func cacheFilePath(scope string) string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
@@ -812,8 +804,9 @@ type item struct {
 // group, which is only rendered when a second group exists to separate it
 // from.
 type section struct {
-	title string
-	items []item
+	title    string
+	items    []item
+	labelled bool
 }
 
 // row lays an entry out as glyph, a right-aligned age column, then the text.
@@ -957,18 +950,18 @@ func pickerItems(cache PRCache) []item {
 	reasons, loose := foldNotifications(cache.All, cache.Reviews, cache.Notifications)
 
 	prs := section{title: "Pull requests"}
-	drafts := section{title: "Drafts"}
+	drafts := section{title: "Drafts", labelled: true}
 	for _, pr := range cache.All {
 		prefix := "○"
 		switch {
-		case pr.IsDraft:
-			prefix = glyphDraft
 		case isApproved(pr, cache.Approved):
 			prefix = "✓"
+		case pr.IsDraft:
+			prefix = glyphDraft
 		}
-		suffix := draftApproval(pr, cache.Approved)
+		suffix := ""
 		if pr.Queue != nil {
-			suffix += " · " + pr.Queue.Summary()
+			suffix = " · " + pr.Queue.Summary()
 		}
 		suffix += commentsSuffix(pr.Comments) + reasons[pr.URL]
 		it := item{
@@ -1056,10 +1049,9 @@ func pickerItems(cache PRCache) []item {
 
 	var items []item
 	for i, s := range populated {
-		// No divider above the first group: it separates nothing, and it
-		// would sit under the cursor fuzzel opens with, so Enter on the
-		// default selection would do nothing at all.
-		if i > 0 {
+		// No divider above the first group, since it separates nothing,
+		// except for drafts, whose ✓ and ◌ would otherwise pass for ready PRs.
+		if i > 0 || s.labelled {
 			items = append(items, item{label: divider(s.title), divider: true})
 		}
 		items = append(items, s.items...)
@@ -1090,14 +1082,27 @@ func pick(items []item, prompt string) (item, bool) {
 	}
 
 	lines := min(len(items), pickerMaxLines)
-	cmd := exec.Command("fuzzel", "--dmenu", "--index",
-		fmt.Sprintf("--width=%d", pickerWidth), fmt.Sprintf("--lines=%d", lines), "--prompt", prompt)
+	args := []string{"--dmenu", "--index",
+		fmt.Sprintf("--width=%d", pickerWidth), fmt.Sprintf("--lines=%d", lines), "--prompt", prompt}
+	if i := firstAction(items); i > 0 {
+		args = append(args, fmt.Sprintf("--select-index=%d", i))
+	}
+	cmd := exec.Command("fuzzel", args...)
 	cmd.Stdin = strings.NewReader(strings.Join(entries, "\n"))
 	out, err := cmd.Output()
 	if err != nil {
 		return item{}, false // user cancelled
 	}
 	return resolve(items, string(out))
+}
+
+func firstAction(items []item) int {
+	for i, it := range items {
+		if !it.divider {
+			return i
+		}
+	}
+	return 0
 }
 
 // resolve maps fuzzel's --index output back to the item it names.
