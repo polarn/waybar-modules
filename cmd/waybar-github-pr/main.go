@@ -21,6 +21,7 @@ type PR struct {
 	URL        string     `json:"url"`
 	Number     int        `json:"number"`
 	CreatedAt  string     `json:"createdAt"`
+	UpdatedAt  string     `json:"updatedAt"`
 	IsDraft    bool       `json:"isDraft"`
 	Repository Repository `json:"repository"`
 
@@ -664,7 +665,7 @@ func fetchPRs(review string) ([]PR, error) {
 	args := []string{"search", "prs",
 		"--state=open",
 		"--author=@me",
-		"--json=title,url,number,repository,createdAt,isDraft",
+		"--json=title,url,number,repository,createdAt,updatedAt,isDraft",
 		"--limit=100",
 	}
 	if review != "" {
