@@ -72,6 +72,30 @@ func TestPickerReviews(t *testing.T) {
 	}
 }
 
+func TestPickerDependabot(t *testing.T) {
+	human := ReviewRequest{Title: "add template", URL: "https://github.com/o/r/pull/9", Number: 9,
+		Repo: "o/r", Author: "gnuruzzi"}
+	bot := ReviewRequest{Title: "bump boto3", URL: "https://github.com/o/r/pull/10", Number: 10,
+		Repo: "o/r", Author: "dependabot", Teams: []string{"platform"}}
+
+	items := pickerItems(PRCache{Reviews: []ReviewRequest{bot, human}})
+	if len(items) != 3 {
+		t.Fatalf("got %d rows, want review, divider, dependabot: %+v", len(items), items)
+	}
+	if !strings.HasPrefix(items[0].label, glyphReview) || items[0].url != human.URL {
+		t.Errorf("first row %q should be the human review", items[0].label)
+	}
+	if !items[1].divider || !strings.Contains(items[1].label, "Dependabot") {
+		t.Errorf("second row %q should be the Dependabot divider", items[1].label)
+	}
+	if !strings.HasPrefix(items[2].label, glyphDependabot) || items[2].url != bot.URL {
+		t.Errorf("third row %q should be the dependabot PR", items[2].label)
+	}
+	if !strings.HasSuffix(items[2].label, "bump boto3 · for platform") {
+		t.Errorf("dependabot row %q should drop the author but keep the team", items[2].label)
+	}
+}
+
 func TestStaleReviewRequest(t *testing.T) {
 	notif := func(reason, pull string) Notification {
 		var n Notification

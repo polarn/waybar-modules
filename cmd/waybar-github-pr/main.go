@@ -365,8 +365,12 @@ func main() {
 				text += fmt.Sprintf(" %s %d", glyphDequeued, refused)
 			}
 		}
-		if n := len(reviews.Requests); n > 0 {
+		people, bots := splitDependabot(reviews.Requests)
+		if n := len(people); n > 0 {
 			text += fmt.Sprintf(" %s %d", glyphReview, n)
+		}
+		if n := len(bots); n > 0 {
+			text += fmt.Sprintf(" %s %d", glyphDependabot, n)
 		}
 		if len(notifs) > 0 {
 			text += fmt.Sprintf(" 󰂜 %d", len(notifs))
@@ -386,11 +390,16 @@ func main() {
 			text += fmt.Sprintf(" 󰅧 %d", n)
 		}
 
-		if len(reviews.Requests) > 0 {
-			tooltips = append(tooltips, "")
-			tooltips = append(tooltips, "<b>Review requested</b>")
-			for _, r := range reviews.Requests {
-				tooltips = append(tooltips, fmt.Sprintf("  %s %s%s%s", glyphReview, pangoEscape(r.Head()),
+		for _, g := range []struct {
+			title string
+			reqs  []ReviewRequest
+		}{{"Review requested", people}, {"Dependabot", bots}} {
+			if len(g.reqs) == 0 {
+				continue
+			}
+			tooltips = append(tooltips, "", "<b>"+g.title+"</b>")
+			for _, r := range g.reqs {
+				tooltips = append(tooltips, fmt.Sprintf("  %s %s%s%s", r.Glyph(), pangoEscape(r.Head()),
 					pangoEscape(trimRunes(r.Title, tooltipTitleRunes)), pangoEscape(r.Suffix()+reasons[r.URL])))
 			}
 		}
@@ -941,9 +950,9 @@ func withoutTitles(cache PRCache, hide *regexp.Regexp) (PRCache, int) {
 }
 
 // pickerItems turns one poll's cache into the rows the picker offers, in the
-// order they appear: open PRs, drafts, review requests, workflow runs, roots
-// pending apply, then notifications, each group after the first introduced by
-// a divider.
+// order they appear: open PRs, drafts, review requests, Dependabot PRs
+// awaiting review, workflow runs, roots pending apply, then notifications,
+// each group after the first introduced by a divider.
 func pickerItems(cache PRCache) []item {
 	// Resolved before the PR rows are built rather than patched onto them
 	// afterwards, so a reason is part of the suffix each row is sized around
@@ -978,12 +987,18 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	reviews := section{title: "Review requested"}
+	deps := section{title: "Dependabot"}
 	for _, r := range cache.Reviews {
-		reviews.items = append(reviews.items, item{
-			label: row(glyphReview, parseGHTime(r.UpdatedAt),
+		it := item{
+			label: row(r.Glyph(), parseGHTime(r.UpdatedAt),
 				fitText(r.Head(), r.Title, r.Suffix()+reasons[r.URL])),
 			url: r.URL,
-		})
+		}
+		if r.Dependabot() {
+			deps.items = append(deps.items, it)
+		} else {
+			reviews.items = append(reviews.items, it)
+		}
 	}
 
 	runs := section{title: "Workflow runs"}
@@ -1042,7 +1057,7 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	var populated []section
-	for _, s := range []section{prs, drafts, reviews, runs, applies, notifs} {
+	for _, s := range []section{prs, drafts, reviews, deps, runs, applies, notifs} {
 		if len(s.items) > 0 {
 			populated = append(populated, s)
 		}

@@ -6,7 +6,10 @@ import (
 	"strings"
 )
 
-const glyphReview = "\uf4af"
+const (
+	glyphReview     = "\uf4af"
+	glyphDependabot = "\uf4be"
+)
 
 type ReviewRequest struct {
 	Title     string   `json:"title"`
@@ -22,15 +25,37 @@ func (r ReviewRequest) Head() string {
 	return fmt.Sprintf("[%s#%d] ", r.Repo, r.Number)
 }
 
+func (r ReviewRequest) Dependabot() bool {
+	return r.Author == "dependabot"
+}
+
+func (r ReviewRequest) Glyph() string {
+	if r.Dependabot() {
+		return glyphDependabot
+	}
+	return glyphReview
+}
+
 func (r ReviewRequest) Suffix() string {
 	s := ""
-	if r.Author != "" {
+	if r.Author != "" && !r.Dependabot() {
 		s += " · " + r.Author
 	}
 	if len(r.Teams) > 0 {
 		s += " · for " + strings.Join(r.Teams, ", ")
 	}
 	return s
+}
+
+func splitDependabot(reqs []ReviewRequest) (people, bots []ReviewRequest) {
+	for _, r := range reqs {
+		if r.Dependabot() {
+			bots = append(bots, r)
+		} else {
+			people = append(people, r)
+		}
+	}
+	return people, bots
 }
 
 type reviewsResult struct {
