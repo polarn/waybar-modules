@@ -149,9 +149,9 @@ func repoCachePath() string {
 	return filepath.Join(dir, "waybar-github-modules", "gated-repos.json")
 }
 
-func readRepoCache() (repoCache, bool) {
+func readRepoCache(path string) (repoCache, bool) {
 	var c repoCache
-	data, err := os.ReadFile(repoCachePath())
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return c, false
 	}
@@ -161,8 +161,7 @@ func readRepoCache() (repoCache, bool) {
 	return c, true
 }
 
-func writeRepoCache(c repoCache) {
-	path := repoCachePath()
+func writeRepoCache(path string, c repoCache) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		log.Printf("Error creating repo cache dir: %s", err)
 		return
@@ -225,6 +224,39 @@ func currentLogin() (string, error) {
 // a deployment-review request produces no /notifications entry), so this sweep
 // is how the module learns what to poll.
 func discoverRepos() ([]string, error) {
+	candidates, err := orgRepos()
+	if err != nil {
+		return nil, err
+	}
+
+	// Probing ~70 repos serially takes ~30s; 8 at a time brings it to ~4s,
+	// which is short enough to do inline on the tick where the cache expires.
+	return probeRepos(candidates, func(repo string) bool {
+		var envs struct {
+			Environments []struct {
+				Name            string `json:"name"`
+				ProtectionRules []struct {
+					Type string `json:"type"`
+				} `json:"protection_rules"`
+			} `json:"environments"`
+		}
+		// A repo with no environments 404s or returns an empty list —
+		// both mean "not gated", not "failure", so this is quiet.
+		if err := ghJSON(&envs, "/repos/"+repo+"/environments"); err != nil {
+			return false
+		}
+		for _, e := range envs.Environments {
+			for _, p := range e.ProtectionRules {
+				if p.Type == "required_reviewers" {
+					return true
+				}
+			}
+		}
+		return false
+	}), nil
+}
+
+func orgRepos() ([]string, error) {
 	var orgs []struct {
 		Login string `json:"login"`
 	}
@@ -254,60 +286,42 @@ func discoverRepos() ([]string, error) {
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no candidate repos found")
 	}
+	return candidates, nil
+}
 
-	// Probing ~70 repos serially takes ~30s; 8 at a time brings it to ~4s,
-	// which is short enough to do inline on the tick where the cache expires.
+// probeRepos returns, sorted, the repos for which keep reports true, running
+// up to 8 probes at once.
+func probeRepos(repos []string, keep func(string) bool) []string {
 	const workers = 8
 	var (
 		mu     sync.Mutex
-		gated  []string
+		kept   []string
 		wg     sync.WaitGroup
 		tokens = make(chan struct{}, workers)
 	)
-
-	for _, repo := range candidates {
+	for _, repo := range repos {
 		wg.Add(1)
 		go func(repo string) {
 			defer wg.Done()
 			tokens <- struct{}{}
 			defer func() { <-tokens }()
-
-			var envs struct {
-				Environments []struct {
-					Name            string `json:"name"`
-					ProtectionRules []struct {
-						Type string `json:"type"`
-					} `json:"protection_rules"`
-				} `json:"environments"`
-			}
-			// A repo with no environments 404s or returns an empty list —
-			// both mean "not gated", not "failure", so this is quiet.
-			if err := ghJSON(&envs, "/repos/"+repo+"/environments"); err != nil {
-				return
-			}
-			for _, e := range envs.Environments {
-				for _, p := range e.ProtectionRules {
-					if p.Type == "required_reviewers" {
-						mu.Lock()
-						gated = append(gated, repo)
-						mu.Unlock()
-						return
-					}
-				}
+			if keep(repo) {
+				mu.Lock()
+				kept = append(kept, repo)
+				mu.Unlock()
 			}
 		}(repo)
 	}
 	wg.Wait()
-
-	sort.Strings(gated)
-	return gated, nil
+	sort.Strings(kept)
+	return kept
 }
 
 // watchedRepos returns the repo set to poll this tick, refreshing the cached
 // discovery when it is older than ttl. extra is unioned in so a repo without a
 // gated environment (which discovery cannot find) can still be tracked.
 func watchedRepos(extra []string, ttl time.Duration) (repos []string, login string) {
-	c, ok := readRepoCache()
+	c, ok := readRepoCache(repoCachePath())
 	now := time.Now()
 	stale := !ok || now.Sub(c.Refreshed) > ttl
 
@@ -327,7 +341,7 @@ func watchedRepos(extra []string, ttl time.Duration) (repos []string, login stri
 			c.Login = l
 		}
 		if c.Login != "" && c.Repos != nil {
-			writeRepoCache(c)
+			writeRepoCache(repoCachePath(), c)
 		}
 	}
 

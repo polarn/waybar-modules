@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -100,6 +101,9 @@ func main() {
 	var applyWindow time.Duration
 	var applyDryRun bool
 	var applyIncludeUnapplied bool
+	var releasesEnabled bool
+	var releaseWorkflow string
+	var releaseDryRun bool
 	var queueDryRun bool
 	var scopeName string
 	var workOwnersCSV string
@@ -145,6 +149,12 @@ func main() {
 		"Print the merge-queue state of my open PRs and exit")
 	flag.BoolVar(&applyIncludeUnapplied, "apply-include-unapplied", false,
 		"Also report roots that have never been applied through the workflow (no baseline, noisy)")
+	flag.BoolVar(&releasesEnabled, "releases", false,
+		"Track repos whose release workflow I have dispatched and whose main has unreleased changes")
+	flag.StringVar(&releaseWorkflow, "release-workflow", "release.yml",
+		"Dispatch workflow, taking a `version` input, that --releases tracks and runs")
+	flag.BoolVar(&releaseDryRun, "release-dry-run", false,
+		"Print each released repo's state, with the reasoning, and exit")
 	flag.Parse()
 
 	sc := scope{name: scopeName, owners: map[string]bool{}}
@@ -202,6 +212,24 @@ func main() {
 		for _, p := range pending {
 			fmt.Printf("%-32s %d commit(s), newest %s (%s)\n",
 				p.Root, p.Commits, p.NewestSHA[:7], p.NewestWhen)
+		}
+		return
+	}
+
+	if releaseDryRun {
+		repos := keepRepos(releasedRepos(releaseWorkflow, runsTTL), sc)
+		fmt.Printf("%d repo(s) with %s dispatched by you\n", len(repos), releaseWorkflow)
+		for _, repo := range repos {
+			p, why, err := pendingRelease(repo, releaseWorkflow)
+			switch {
+			case err != nil:
+				fmt.Printf("%-40s error: %s\n", repo, err)
+			case p == nil:
+				fmt.Printf("%-40s %s\n", repo, why)
+			default:
+				fmt.Printf("%-40s %d commit(s) since %s, newest %s → %s (%s)\n",
+					repo, p.Commits, p.LastTag, p.NewestWhen, p.Next(), p.Bump)
+			}
 		}
 		return
 	}
@@ -264,6 +292,14 @@ func main() {
 		}
 		approved, all = keepPRs(approved, sc), keepPRs(all, sc)
 
+		var releases []PendingRelease
+		var releaseRepos []string
+		if releasesEnabled && !swiftbar {
+			releaseRepos = keepRepos(releasedRepos(releaseWorkflow, runsTTL), sc)
+			releases = fetchReleases(releaseRepos, releaseWorkflow)
+			notifyReleases(releases, notify)
+		}
+
 		// Runs are fetched independently of the PR calls above: a repo that
 		// fails to answer must not blank the PR counts. When any watched repo
 		// fails, runsResult.Complete goes false and the run segment is omitted
@@ -273,7 +309,7 @@ func main() {
 		var runs runsResult
 		var approvalRuns, runningRuns, failedRuns []Run
 		if runsEnabled && !swiftbar {
-			repos, login := watchedRepos(watchRuns, runsTTL)
+			repos, login := watchedRepos(slices.Concat(watchRuns, releaseRepos), runsTTL)
 			runs = fetchRuns(keepRepos(repos, sc), login, failedTTL)
 			approvalRuns, runningRuns, failedRuns = splitRuns(runs.Runs)
 			notifyApprovals(approvalRuns, notify)
@@ -348,7 +384,7 @@ func main() {
 		}
 
 		if !swiftbar {
-			writePRCache(sc.name, all, approved, reviews.Requests, notifs, runs.Runs, pending)
+			writePRCache(sc.name, all, approved, reviews.Requests, notifs, runs.Runs, pending, releases)
 		}
 
 		if swiftbar {
@@ -388,6 +424,9 @@ func main() {
 		}
 		if n := len(pending); n > 0 {
 			text += fmt.Sprintf(" 󰅧 %d", n)
+		}
+		if n := len(releases); n > 0 {
+			text += fmt.Sprintf(" %s %d", glyphRelease, n)
 		}
 
 		for _, g := range []struct {
@@ -445,10 +484,18 @@ func main() {
 			}
 		}
 
+		if len(releases) > 0 {
+			tooltips = append(tooltips, "", "<b>Unreleased</b>")
+			for _, p := range releases {
+				tooltips = append(tooltips, fmt.Sprintf("  %s [%s] %d commit(s) since %s · next %s",
+					glyphRelease, pangoEscape(p.Repo), p.Commits, pangoEscape(p.LastTag), pangoEscape(p.Next())))
+			}
+		}
+
 		w := waybar.New()
 		w.Text = text
 		if hideEmpty && len(all) == 0 && len(reviews.Requests) == 0 && len(notifs) == 0 && len(pending) == 0 &&
-			!(runs.Complete && len(runs.Runs) > 0) {
+			len(releases) == 0 && !(runs.Complete && len(runs.Runs) > 0) {
 			w.Text = ""
 		}
 		w.ToolTip = unwrapped(tooltips)
@@ -467,7 +514,7 @@ func main() {
 				classes = append(classes, "dequeued")
 			}
 		}
-		if len(pending) > 0 {
+		if len(pending) > 0 || len(releases) > 0 {
 			classes = append(classes, "pending")
 		}
 		if len(reviews.Requests) > 0 {
@@ -748,17 +795,19 @@ func cacheFilePath(scope string) string {
 }
 
 type PRCache struct {
-	All           []PR            `json:"all"`
-	Approved      []PR            `json:"approved"`
-	Reviews       []ReviewRequest `json:"reviews,omitempty"`
-	Notifications []Notification  `json:"notifications,omitempty"`
-	Runs          []Run           `json:"runs,omitempty"`
-	Pending       []PendingRoot   `json:"pending,omitempty"`
+	All           []PR             `json:"all"`
+	Approved      []PR             `json:"approved"`
+	Reviews       []ReviewRequest  `json:"reviews,omitempty"`
+	Notifications []Notification   `json:"notifications,omitempty"`
+	Runs          []Run            `json:"runs,omitempty"`
+	Pending       []PendingRoot    `json:"pending,omitempty"`
+	Releases      []PendingRelease `json:"releases,omitempty"`
 }
 
-func writePRCache(scope string, all, approved []PR, reviews []ReviewRequest, notifs []Notification, runs []Run, pending []PendingRoot) {
+func writePRCache(scope string, all, approved []PR, reviews []ReviewRequest, notifs []Notification, runs []Run, pending []PendingRoot, releases []PendingRelease) {
 	data, err := json.Marshal(PRCache{
 		All: all, Approved: approved, Reviews: reviews, Notifications: notifs, Runs: runs, Pending: pending,
+		Releases: releases,
 	})
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
@@ -805,6 +854,9 @@ type item struct {
 	// Selecting it starts the workflow rather than opening a page, so it is a
 	// side effect, not a link.
 	dispatch []PendingRoot
+	// Set for a repo with unreleased changes: selecting it asks which version
+	// to release.
+	release *PendingRelease
 	// A labelled rule introducing a group. dmenu has no notion of an inert
 	// line, so selecting one re-opens the picker instead of acting.
 	divider bool
@@ -895,7 +947,7 @@ func openPRs(scope string, hide *regexp.Regexp) {
 	// pill would dispatch against prod with nothing shown. Only take the
 	// shortcut when the lone item is inert. A one-item list never carries a
 	// divider, so this cannot fire on one.
-	if len(items) == 1 && items[0].dispatch == nil {
+	if len(items) == 1 && items[0].dispatch == nil && items[0].release == nil {
 		openItem(items[0].url, items[0].dismiss)
 		return
 	}
@@ -910,6 +962,10 @@ func openPRs(scope string, hide *regexp.Regexp) {
 		}
 		if it.dispatch != nil {
 			dispatchApplies(it.dispatch)
+			return
+		}
+		if it.release != nil {
+			chooseRelease(*it.release)
 			return
 		}
 		openItem(it.url, it.dismiss)
@@ -951,7 +1007,7 @@ func withoutTitles(cache PRCache, hide *regexp.Regexp) (PRCache, int) {
 
 // pickerItems turns one poll's cache into the rows the picker offers, in the
 // order they appear: open PRs, drafts, review requests, Dependabot PRs
-// awaiting review, workflow runs, roots pending apply, then notifications,
+// awaiting review, workflow runs, roots pending apply, unreleased repos, then notifications,
 // each group after the first introduced by a divider.
 func pickerItems(cache PRCache) []item {
 	// Resolved before the PR rows are built rather than patched onto them
@@ -1046,6 +1102,17 @@ func pickerItems(cache PRCache) []item {
 		})
 	}
 
+	releases := section{title: "Unreleased"}
+	for _, p := range cache.Releases {
+		releases.items = append(releases.items, item{
+			label: row(glyphRelease, parseGHTime(p.NewestWhen),
+				fitText(fmt.Sprintf("[%s] ", p.Repo), fmt.Sprintf("%d commit(s) since %s", p.Commits, p.LastTag),
+					" · release "+p.Next())),
+			url:     p.CompareURL,
+			release: &p,
+		})
+	}
+
 	notifs := section{title: "Notifications"}
 	for _, n := range loose {
 		notifs.items = append(notifs.items, item{
@@ -1057,7 +1124,7 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	var populated []section
-	for _, s := range []section{prs, drafts, reviews, deps, runs, applies, notifs} {
+	for _, s := range []section{prs, drafts, reviews, deps, runs, applies, releases, notifs} {
 		if len(s.items) > 0 {
 			populated = append(populated, s)
 		}

@@ -19,7 +19,7 @@ The name is now narrower than the contents; see "Why it is still called waybar-m
 Bar modules (daemon, prints waybar JSON on an interval):
 
 - `cmd/waybar-gitlab-mr/` - Count of GitLab merge requests awaiting review
-- `cmd/waybar-github-pr/` - Your open PRs (approved·total), PRs awaiting your or your team's review, GitHub notifications, workflow runs, merge-queue state and terraform roots pending apply, with a fuzzel picker on click. Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
+- `cmd/waybar-github-pr/` - Your open PRs (approved·total), PRs awaiting your or your team's review, GitHub notifications, workflow runs, merge-queue state, terraform roots pending apply and repos with unreleased changes, with a fuzzel picker on click. Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
 - `cmd/waybar-wiim-nowplaying/` - Now-playing info from a WiiM device (amp/mini/pro), with volume control. SwiftBar-enabled.
 - `cmd/waybar-cpu-temp/` - CPU temperature, tooltip lists every CPU hwmon sensor
 - `cmd/waybar-gpu-temp/` - GPU temperature; picks the card with the most sensors (the discrete one), tooltip lists loaded llama-swap models
@@ -224,6 +224,18 @@ The cut point between applied and unapplied is the **position** of the last succ
 This is a proxy for a plan, not a plan: it cannot see console drift, and a substantive-looking edit can still plan empty. `drift.yml`'s weekly real plan across all roots remains the authority.
 
 `--swiftbar` skips runs entirely, which also sidesteps a trap: SwiftBar re-execs the binary every 5 minutes as a fresh process, so a run-enabled swiftbar path would need the discovery cache to persist or it would pay the full sweep on every tick.
+
+### Unreleased changes (`--releases`)
+
+Optional fifth state, off by default, for repos released by dispatching `--release-workflow` (`release.yml`) with a `version` input. Every such workflow in `validio-internal` (postgres, redis, surface, ve, the websites…) shares that shape: it tags, retags the `g<sha>` image built on main, publishes the chart and creates the GitHub release.
+
+- **Which repos:** those whose release workflow you have dispatched at least once (`actor=<login>&event=workflow_dispatch`, `total_count > 0`), found by the same org sweep as the gated repos and cached an hour in `released-repos.json`. They are also unioned into the runs watch set, so a release you dispatch shows as running and, if it breaks, as failed.
+- **Pending:** the highest semver among the latest 20 non-draft, non-prerelease releases, compared `<tag>...main`. Commits whose files are all under `.github/` or `.claude/`, or are markdown, don't count: the image and chart are unchanged, so redis's CODEOWNERS and CI-only commits don't ask for a release. A truncated file list (300) counts. A repo with a release run in flight is skipped, as with applies.
+- **Version:** patch, minor for any `feat`, major for any `!`, read from conventional-commit subjects with or without a leading `[TICKET]` (surface writes `[UI-8704] feat(ui): …`). Only a suggestion: postgres 3.8.1 shipped a `feat` as a patch.
+- **Picking a row** opens a second fuzzel prompt (`--match-mode=exact`) listing the suggested version, the other two bumps and the compare page; typing a version that matches nothing dispatches that instead. There is no environment gate behind a release, unlike apply, so the row never dispatches on its own, and a lone release row doesn't take the single-item shortcut.
+- A repo whose poll fails serves its last answer, so a transient error doesn't drop the row and re-notify on the next tick. Notifications are keyed on repo and tag.
+
+`--release-dry-run` prints each discovered repo's verdict and reason.
 
 ## bambu-ctl module details
 
