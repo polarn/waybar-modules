@@ -101,7 +101,7 @@ func main() {
 	var applyWindow time.Duration
 	var applyDryRun bool
 	var applyIncludeUnapplied bool
-	var releasesEnabled bool
+	var releaseReposCSV string
 	var releaseWorkflow string
 	var releaseDryRun bool
 	var queueDryRun bool
@@ -149,8 +149,8 @@ func main() {
 		"Print the merge-queue state of my open PRs and exit")
 	flag.BoolVar(&applyIncludeUnapplied, "apply-include-unapplied", false,
 		"Also report roots that have never been applied through the workflow (no baseline, noisy)")
-	flag.BoolVar(&releasesEnabled, "releases", false,
-		"Track repos whose release workflow I have dispatched and whose main has unreleased changes")
+	flag.StringVar(&releaseReposCSV, "release-repos", "",
+		"Comma-separated owner/repo entries to track for changes on main not yet released (empty disables)")
 	flag.StringVar(&releaseWorkflow, "release-workflow", "release.yml",
 		"Dispatch workflow, taking a `version` input, that --releases tracks and runs")
 	flag.BoolVar(&releaseDryRun, "release-dry-run", false,
@@ -216,10 +216,16 @@ func main() {
 		return
 	}
 
+	var releaseRepos []string
+	for _, r := range strings.Split(releaseReposCSV, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			releaseRepos = append(releaseRepos, r)
+		}
+	}
+	releaseRepos = keepRepos(releaseRepos, sc)
+
 	if releaseDryRun {
-		repos := keepRepos(releasedRepos(releaseWorkflow, runsTTL), sc)
-		fmt.Printf("%d repo(s) with %s dispatched by you\n", len(repos), releaseWorkflow)
-		for _, repo := range repos {
+		for _, repo := range releaseRepos {
 			p, why, err := pendingRelease(repo, releaseWorkflow)
 			switch {
 			case err != nil:
@@ -293,9 +299,7 @@ func main() {
 		approved, all = keepPRs(approved, sc), keepPRs(all, sc)
 
 		var releases []PendingRelease
-		var releaseRepos []string
-		if releasesEnabled && !swiftbar {
-			releaseRepos = keepRepos(releasedRepos(releaseWorkflow, runsTTL), sc)
+		if len(releaseRepos) > 0 && !swiftbar {
 			releases = fetchReleases(releaseRepos, releaseWorkflow)
 			notifyReleases(releases, notify)
 		}

@@ -225,17 +225,17 @@ This is a proxy for a plan, not a plan: it cannot see console drift, and a subst
 
 `--swiftbar` skips runs entirely, which also sidesteps a trap: SwiftBar re-execs the binary every 5 minutes as a fresh process, so a run-enabled swiftbar path would need the discovery cache to persist or it would pay the full sweep on every tick.
 
-### Unreleased changes (`--releases`)
+### Unreleased changes (`--release-repos`)
 
-Optional fifth state, off by default, for repos released by dispatching `--release-workflow` (`release.yml`) with a `version` input. Every such workflow in `validio-internal` (postgres, redis, surface, ve, the websites…) shares that shape: it tags, retags the `g<sha>` image built on main, publishes the chart and creates the GitHub release.
+Optional fifth state, off by default, for the listed repos, released by dispatching `--release-workflow` (`release.yml`) with a `version` input. Every such workflow in `validio-internal` (postgres, redis, surface, ve, the websites…) shares that shape: it tags, retags the `g<sha>` image built on main, publishes the chart and creates the GitHub release.
 
-- **Which repos:** those whose release workflow you have dispatched at least once (`actor=<login>&event=workflow_dispatch`, `total_count > 0`), found by the same org sweep as the gated repos and cached an hour in `released-repos.json`. They are also unioned into the runs watch set, so a release you dispatch shows as running and, if it breaks, as failed.
+- **Which repos:** an explicit list, not discovered. Discovering "repos whose release workflow you have dispatched" picked up surface, released once and not wanted here, with 28 unreleased commits. The listed repos are also unioned into the runs watch set, so a release you dispatch shows as running and, if it breaks, as failed.
 - **Pending:** the highest semver among the latest 20 non-draft, non-prerelease releases, compared `<tag>...main`. Commits whose files are all under `.github/` or `.claude/`, or are markdown, don't count: the image and chart are unchanged, so redis's CODEOWNERS and CI-only commits don't ask for a release. A truncated file list (300) counts. A repo with a release run in flight is skipped, as with applies.
 - **Version:** patch, minor for any `feat`, major for any `!`, read from conventional-commit subjects with or without a leading `[TICKET]` (surface writes `[UI-8704] feat(ui): …`). Only a suggestion: postgres 3.8.1 shipped a `feat` as a patch.
 - **Picking a row** opens a second fuzzel prompt (`--match-mode=exact`) listing the suggested version, the other two bumps and the compare page; typing a version that matches nothing dispatches that instead. There is no environment gate behind a release, unlike apply, so the row never dispatches on its own, and a lone release row doesn't take the single-item shortcut.
 - A repo whose poll fails serves its last answer, so a transient error doesn't drop the row and re-notify on the next tick. Notifications are keyed on repo and tag.
 
-`--release-dry-run` prints each discovered repo's verdict and reason.
+`--release-dry-run` prints each listed repo's verdict and reason.
 
 ## bambu-ctl module details
 

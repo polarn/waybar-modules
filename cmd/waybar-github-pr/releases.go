@@ -4,11 +4,9 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const glyphRelease = ""
@@ -225,58 +223,6 @@ func fetchReleases(repos []string, workflow string) []PendingRelease {
 		}
 	}
 	return out
-}
-
-// ---------------------------------------------------------------------------
-// Discovery: the repos whose release workflow this user has dispatched
-// ---------------------------------------------------------------------------
-
-var nextReleaseDiscovery time.Time
-
-func releaseCachePath() string {
-	return filepath.Join(filepath.Dir(repoCachePath()), "released-repos.json")
-}
-
-func discoverReleased(login, workflow string) ([]string, error) {
-	candidates, err := orgRepos()
-	if err != nil {
-		return nil, err
-	}
-	return probeRepos(candidates, func(repo string) bool {
-		var runs struct {
-			TotalCount int `json:"total_count"`
-		}
-		path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?actor=%s&event=workflow_dispatch&per_page=1",
-			repo, workflow, login)
-		if err := ghJSON(&runs, path); err != nil {
-			return false
-		}
-		return runs.TotalCount > 0
-	}), nil
-}
-
-func releasedRepos(workflow string, ttl time.Duration) []string {
-	path := releaseCachePath()
-	c, ok := readRepoCache(path)
-	now := time.Now()
-	if (ok && now.Sub(c.Refreshed) <= ttl) || now.Before(nextReleaseDiscovery) {
-		return c.Repos
-	}
-	login, err := currentLogin()
-	if err != nil {
-		log.Printf("Error resolving GitHub login: %s", err)
-		nextReleaseDiscovery = now.Add(10 * time.Minute)
-		return c.Repos
-	}
-	repos, err := discoverReleased(login, workflow)
-	if err != nil {
-		log.Printf("Error discovering released repos: %s", err)
-		nextReleaseDiscovery = now.Add(10 * time.Minute)
-		return c.Repos
-	}
-	c = repoCache{Login: login, Repos: repos, Refreshed: time.Now()}
-	writeRepoCache(path, c)
-	return c.Repos
 }
 
 // ---------------------------------------------------------------------------
