@@ -405,12 +405,15 @@ func main() {
 				text += fmt.Sprintf(" %s %d", glyphDequeued, refused)
 			}
 		}
-		people, bots := splitDependabot(reviews.Requests)
+		people, dependabot, renovate := splitBots(reviews.Requests)
 		if n := len(people); n > 0 {
 			text += fmt.Sprintf(" %s %d", glyphReview, n)
 		}
-		if n := len(bots); n > 0 {
+		if n := len(dependabot); n > 0 {
 			text += fmt.Sprintf(" %s %d", glyphDependabot, n)
+		}
+		if n := len(renovate); n > 0 {
+			text += fmt.Sprintf(" %s %d", glyphRenovate, n)
 		}
 		if len(notifs) > 0 {
 			text += fmt.Sprintf(" 󰂜 %d", len(notifs))
@@ -436,7 +439,7 @@ func main() {
 		for _, g := range []struct {
 			title string
 			reqs  []ReviewRequest
-		}{{"Review requested", people}, {"Dependabot", bots}} {
+		}{{"Review requested", people}, {"Dependabot", dependabot}, {"Renovate", renovate}} {
 			if len(g.reqs) == 0 {
 				continue
 			}
@@ -1010,8 +1013,8 @@ func withoutTitles(cache PRCache, hide *regexp.Regexp) (PRCache, int) {
 }
 
 // pickerItems turns one poll's cache into the rows the picker offers, in the
-// order they appear: open PRs, drafts, review requests, Dependabot PRs
-// awaiting review, workflow runs, roots pending apply, unreleased repos, then notifications,
+// order they appear: open PRs, drafts, review requests, Dependabot and
+// Renovate PRs awaiting review, workflow runs, roots pending apply, unreleased repos, then notifications,
 // each group after the first introduced by a divider.
 func pickerItems(cache PRCache) []item {
 	// Resolved before the PR rows are built rather than patched onto them
@@ -1048,15 +1051,19 @@ func pickerItems(cache PRCache) []item {
 
 	reviews := section{title: "Review requested"}
 	deps := section{title: "Dependabot"}
+	renovate := section{title: "Renovate"}
 	for _, r := range cache.Reviews {
 		it := item{
 			label: row(r.Glyph(), parseGHTime(r.UpdatedAt),
 				fitText(r.Head(), r.Title, r.Suffix()+reasons[r.URL])),
 			url: r.URL,
 		}
-		if r.Dependabot() {
+		switch {
+		case r.Dependabot():
 			deps.items = append(deps.items, it)
-		} else {
+		case r.Renovate():
+			renovate.items = append(renovate.items, it)
+		default:
 			reviews.items = append(reviews.items, it)
 		}
 	}
@@ -1128,7 +1135,7 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	var populated []section
-	for _, s := range []section{prs, drafts, reviews, deps, runs, applies, releases, notifs} {
+	for _, s := range []section{prs, drafts, reviews, deps, renovate, runs, applies, releases, notifs} {
 		if len(s.items) > 0 {
 			populated = append(populated, s)
 		}

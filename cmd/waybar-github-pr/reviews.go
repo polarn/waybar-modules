@@ -9,6 +9,7 @@ import (
 const (
 	glyphReview     = "\uf4af"
 	glyphDependabot = "\uf4be"
+	glyphRenovate   = "\uee72"
 )
 
 type ReviewRequest struct {
@@ -29,16 +30,23 @@ func (r ReviewRequest) Dependabot() bool {
 	return r.Author == "dependabot"
 }
 
+func (r ReviewRequest) Renovate() bool {
+	return r.Author == "renovate" || strings.HasSuffix(r.Author, "-renovate")
+}
+
 func (r ReviewRequest) Glyph() string {
-	if r.Dependabot() {
+	switch {
+	case r.Dependabot():
 		return glyphDependabot
+	case r.Renovate():
+		return glyphRenovate
 	}
 	return glyphReview
 }
 
 func (r ReviewRequest) Suffix() string {
 	s := ""
-	if r.Author != "" && !r.Dependabot() {
+	if r.Author != "" && !r.Dependabot() && !r.Renovate() {
 		s += " · " + r.Author
 	}
 	if len(r.Teams) > 0 {
@@ -47,15 +55,18 @@ func (r ReviewRequest) Suffix() string {
 	return s
 }
 
-func splitDependabot(reqs []ReviewRequest) (people, bots []ReviewRequest) {
+func splitBots(reqs []ReviewRequest) (people, dependabot, renovate []ReviewRequest) {
 	for _, r := range reqs {
-		if r.Dependabot() {
-			bots = append(bots, r)
-		} else {
+		switch {
+		case r.Dependabot():
+			dependabot = append(dependabot, r)
+		case r.Renovate():
+			renovate = append(renovate, r)
+		default:
 			people = append(people, r)
 		}
 	}
-	return people, bots
+	return people, dependabot, renovate
 }
 
 type reviewsResult struct {

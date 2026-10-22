@@ -96,6 +96,34 @@ func TestPickerDependabot(t *testing.T) {
 	}
 }
 
+func TestPickerRenovate(t *testing.T) {
+	dep := ReviewRequest{Title: "bump boto3", URL: "https://github.com/o/r/pull/10", Number: 10,
+		Repo: "o/r", Author: "dependabot"}
+	hosted := ReviewRequest{Title: "update docker", URL: "https://github.com/o/r/pull/11", Number: 11,
+		Repo: "o/r", Author: "renovate"}
+	self := ReviewRequest{Title: "update redis", URL: "https://github.com/o/r/pull/12", Number: 12,
+		Repo: "o/r", Author: "validio-renovate", Teams: []string{"platform"}}
+
+	items := pickerItems(PRCache{Reviews: []ReviewRequest{self, dep, hosted}})
+	if len(items) != 4 {
+		t.Fatalf("got %d rows, want dependabot, divider, two renovate: %+v", len(items), items)
+	}
+	if !strings.HasPrefix(items[0].label, glyphDependabot) || items[0].url != dep.URL {
+		t.Errorf("first row %q should be the dependabot PR", items[0].label)
+	}
+	if !items[1].divider || !strings.Contains(items[1].label, "Renovate") {
+		t.Errorf("second row %q should be the Renovate divider", items[1].label)
+	}
+	for i, want := range []ReviewRequest{self, hosted} {
+		if got := items[2+i]; !strings.HasPrefix(got.label, glyphRenovate) || got.url != want.URL {
+			t.Errorf("row %d %q should be renovate PR %s", 2+i, got.label, want.URL)
+		}
+	}
+	if !strings.HasSuffix(items[2].label, "update redis · for platform") {
+		t.Errorf("renovate row %q should drop the author but keep the team", items[2].label)
+	}
+}
+
 func TestStaleReviewRequest(t *testing.T) {
 	notif := func(reason, pull string) Notification {
 		var n Notification
