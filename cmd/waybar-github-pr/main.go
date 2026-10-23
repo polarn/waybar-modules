@@ -89,6 +89,7 @@ func main() {
 	var notify bool
 	var swiftbar bool
 	var notifyReasonsCSV string
+	var quietReviewReposCSV string
 	var runsEnabled bool
 	var queueEnabled bool
 	var reviewsEnabled bool
@@ -123,6 +124,8 @@ func main() {
 	flag.StringVar(&notifyReasonsCSV, "notify-reasons",
 		"mention,team_mention,review_requested,assign,comment,author",
 		"Comma-separated reasons that should produce notify-send + count toward the pill")
+	flag.StringVar(&quietReviewReposCSV, "quiet-review-repos", "",
+		"Comma-separated owner/repo entries whose review requests count but fire no notify-send")
 	flag.BoolVar(&runsEnabled, "runs", true,
 		"Track GitHub Actions runs that need attention (waiting on my approval, or dispatched by me and still going)")
 	flag.BoolVar(&queueEnabled, "merge-queue", true,
@@ -281,6 +284,13 @@ func main() {
 			notifyReasons[r] = true
 		}
 	}
+	quietReviewRepos := map[string]bool{}
+	for _, r := range strings.Split(quietReviewReposCSV, ",") {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			quietReviewRepos[r] = true
+		}
+	}
 
 	for {
 		approved, err := fetchPRs("approved")
@@ -352,7 +362,7 @@ func main() {
 
 		// Pull notifications, fire notify-send for any new ones, and feed the
 		// filtered count into the pill / tooltip / left-click menu.
-		notifs := processNotifications(notifyReasons, notify, sc, reviews)
+		notifs := processNotifications(notifyReasons, quietReviewRepos, notify, sc, reviews)
 		reasons, loose := foldNotifications(all, reviews.Requests, notifs)
 
 		var tooltips, draftTips []string
@@ -583,7 +593,7 @@ func fetchNotifications() ([]Notification, error) {
 // daemon doesn't spam notify-send for everything sitting unread on startup),
 // and fires notify-send for genuinely new notifications. Returns the filtered
 // set so the caller can display a count and tooltip.
-func processNotifications(reasons map[string]bool, notify bool, sc scope, reviews reviewsResult) []Notification {
+func processNotifications(reasons, quietReviewRepos map[string]bool, notify bool, sc scope, reviews reviewsResult) []Notification {
 	all, err := fetchNotifications()
 	if err != nil {
 		log.Printf("notifications: %s", err)
@@ -612,6 +622,9 @@ func processNotifications(reasons map[string]bool, notify bool, sc scope, review
 		return filtered
 	}
 	for _, n := range toAnnounce(filtered) {
+		if quietReview(n, reviews, quietReviewRepos) {
+			continue
+		}
 		notifySendForGitHub(n)
 	}
 	return filtered

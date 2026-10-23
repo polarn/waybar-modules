@@ -179,6 +179,26 @@ func (r reviewsResult) stale(n Notification) bool {
 	return true
 }
 
+func (r reviewsResult) fromBot(n Notification) bool {
+	if n.Reason != "review_requested" {
+		return false
+	}
+	url := subjectWebURL(n)
+	for _, req := range r.Requests {
+		if req.URL == url {
+			return req.Dependabot() || req.Renovate()
+		}
+	}
+	return false
+}
+
+func quietReview(n Notification, reviews reviewsResult, repos map[string]bool) bool {
+	if n.Reason != "review_requested" {
+		return false
+	}
+	return repos[n.Repository.FullName] || reviews.fromBot(n)
+}
+
 const reviewsQuery = `
 {
   viewer { login }

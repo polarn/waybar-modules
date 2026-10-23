@@ -154,6 +154,69 @@ func TestStaleReviewRequest(t *testing.T) {
 	}
 }
 
+func TestBotReviewRequest(t *testing.T) {
+	notif := func(reason, pull string) Notification {
+		var n Notification
+		n.Reason = reason
+		n.Subject.URL = "https://api.github.com/repos/validio-internal/flux/pulls/" + pull
+		return n
+	}
+	reviews := reviewsResult{Complete: true, Requests: []ReviewRequest{
+		{URL: "https://github.com/validio-internal/flux/pull/1", Author: "validio-renovate", Title: "chore(deps): update sap-iq"},
+		{URL: "https://github.com/validio-internal/flux/pull/2", Author: "dependabot"},
+		{URL: "https://github.com/validio-internal/flux/pull/3", Author: "EDjur", Title: "chore(release): Deploy 11.2.1 to PROD"},
+	}}
+
+	cases := []struct {
+		name string
+		n    Notification
+		want bool
+	}{
+		{"renovate", notif("review_requested", "1"), true},
+		{"dependabot", notif("review_requested", "2"), true},
+		{"human chore", notif("review_requested", "3"), false},
+		{"not in search", notif("review_requested", "4"), false},
+		{"other reason on a bot PR", notif("mention", "1"), false},
+	}
+	for _, c := range cases {
+		if got := reviews.fromBot(c.n); got != c.want {
+			t.Errorf("%s: fromBot = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestQuietReview(t *testing.T) {
+	notif := func(reason, repo string) Notification {
+		var n Notification
+		n.Reason = reason
+		n.Repository.FullName = repo
+		n.Subject.URL = "https://api.github.com/repos/" + repo + "/pulls/5"
+		return n
+	}
+	quiet := map[string]bool{"validio-internal/vibeseidon": true}
+	reviews := reviewsResult{Complete: true, Requests: []ReviewRequest{
+		{URL: "https://github.com/validio-internal/flux/pull/5", Author: "validio-renovate"},
+		{URL: "https://github.com/validio-internal/vibeseidon/pull/5", Author: "EDjur"},
+		{URL: "https://github.com/validio-internal/infra/pull/5", Author: "EDjur"},
+	}}
+
+	cases := []struct {
+		name string
+		n    Notification
+		want bool
+	}{
+		{"quiet repo", notif("review_requested", "validio-internal/vibeseidon"), true},
+		{"bot elsewhere", notif("review_requested", "validio-internal/flux"), true},
+		{"person elsewhere", notif("review_requested", "validio-internal/infra"), false},
+		{"mention in quiet repo", notif("mention", "validio-internal/vibeseidon"), false},
+	}
+	for _, c := range cases {
+		if got := quietReview(c.n, reviews, quiet); got != c.want {
+			t.Errorf("%s: quietReview = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestPickerGroupsReviews(t *testing.T) {
 	req := func(repo string, n int, author, title string) ReviewRequest {
 		return ReviewRequest{Title: title, URL: fmt.Sprintf("https://github.com/%s/pull/%d", repo, n),
