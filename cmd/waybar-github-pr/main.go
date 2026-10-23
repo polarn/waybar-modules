@@ -1013,7 +1013,8 @@ func withoutTitles(cache PRCache, hide *regexp.Regexp) (PRCache, int) {
 }
 
 // pickerItems turns one poll's cache into the rows the picker offers, in the
-// order they appear: open PRs, drafts, review requests, Dependabot and
+// order they appear: open PRs, drafts, review requests, then review requests
+// grouped by repo and by a title sent to several repos, Dependabot and
 // Renovate PRs awaiting review, workflow runs, roots pending apply, unreleased repos, then notifications,
 // each group after the first introduced by a divider.
 func pickerItems(cache PRCache) []item {
@@ -1049,23 +1050,39 @@ func pickerItems(cache PRCache) []item {
 		}
 	}
 
+	reviewItem := func(r ReviewRequest, head, middle string) item {
+		return item{
+			label: row(r.Glyph(), parseGHTime(r.UpdatedAt),
+				fitText(head, middle, r.Suffix()+reasons[r.URL])),
+			url: r.URL,
+		}
+	}
 	reviews := section{title: "Review requested"}
 	deps := section{title: "Dependabot"}
 	renovate := section{title: "Renovate"}
+	var people []ReviewRequest
 	for _, r := range cache.Reviews {
-		it := item{
-			label: row(r.Glyph(), parseGHTime(r.UpdatedAt),
-				fitText(r.Head(), r.Title, r.Suffix()+reasons[r.URL])),
-			url: r.URL,
-		}
 		switch {
 		case r.Dependabot():
-			deps.items = append(deps.items, it)
+			deps.items = append(deps.items, reviewItem(r, r.Head(), r.Title))
 		case r.Renovate():
-			renovate.items = append(renovate.items, it)
+			renovate.items = append(renovate.items, reviewItem(r, r.Head(), r.Title))
 		default:
-			reviews.items = append(reviews.items, it)
+			people = append(people, r)
 		}
+	}
+	solo, groups := groupReviews(people)
+	for _, r := range solo {
+		reviews.items = append(reviews.items, reviewItem(r, r.Head(), r.Title))
+	}
+	var grouped []section
+	for _, g := range groups {
+		s := section{title: g.title, labelled: true}
+		for _, r := range g.reqs {
+			head, middle := g.row(r)
+			s.items = append(s.items, reviewItem(r, head, middle))
+		}
+		grouped = append(grouped, s)
 	}
 
 	runs := section{title: "Workflow runs"}
@@ -1135,7 +1152,9 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	var populated []section
-	for _, s := range []section{prs, drafts, reviews, deps, renovate, runs, applies, releases, notifs} {
+	ordered := append(append([]section{prs, drafts, reviews}, grouped...),
+		deps, renovate, runs, applies, releases, notifs)
+	for _, s := range ordered {
 		if len(s.items) > 0 {
 			populated = append(populated, s)
 		}

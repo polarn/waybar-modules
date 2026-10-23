@@ -1,8 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log"
+	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -67,6 +70,95 @@ func splitBots(reqs []ReviewRequest) (people, dependabot, renovate []ReviewReque
 		}
 	}
 	return people, dependabot, renovate
+}
+
+const groupMin = 3
+
+var ticketKey = regexp.MustCompile(`\[?\b[A-Z][A-Z0-9]+-\d+\b\]?`)
+
+func splitTickets(title string) (rest, tickets string) {
+	keys := ticketKey.FindAllString(title, -1)
+	for i, k := range keys {
+		keys[i] = strings.Trim(k, "[]")
+	}
+	rest = strings.Join(strings.Fields(ticketKey.ReplaceAllString(title, " ")), " ")
+	return rest, strings.Join(keys, " ")
+}
+
+type reviewGroup struct {
+	title  string
+	reqs   []ReviewRequest
+	fanOut bool
+}
+
+func (g reviewGroup) row(r ReviewRequest) (head, middle string) {
+	if !g.fanOut {
+		return fmt.Sprintf("#%d ", r.Number), r.Title
+	}
+	if _, tickets := splitTickets(r.Title); tickets != "" {
+		middle = " " + tickets
+	}
+	return strings.TrimSuffix(r.Head(), " "), middle
+}
+
+func byRepoAndNumber(a, b ReviewRequest) int {
+	return cmp.Or(cmp.Compare(a.Repo, b.Repo), cmp.Compare(a.Number, b.Number))
+}
+
+func groupReviews(reqs []ReviewRequest) (loose []ReviewRequest, groups []reviewGroup) {
+	taken := make(map[string]bool)
+	take := func(rs []ReviewRequest) {
+		for _, r := range rs {
+			taken[r.URL] = true
+		}
+	}
+
+	byTitle := make(map[string][]ReviewRequest)
+	for _, r := range reqs {
+		if t, _ := splitTickets(r.Title); t != "" {
+			byTitle[t] = append(byTitle[t], r)
+		}
+	}
+	var fanOuts []reviewGroup
+	for t, rs := range byTitle {
+		repos := make(map[string]bool)
+		for _, r := range rs {
+			repos[r.Repo] = true
+		}
+		if len(repos) < groupMin {
+			continue
+		}
+		slices.SortFunc(rs, byRepoAndNumber)
+		fanOuts = append(fanOuts, reviewGroup{title: fmt.Sprintf("%s · %d repos", t, len(repos)), reqs: rs, fanOut: true})
+		take(rs)
+	}
+
+	byRepo := make(map[string][]ReviewRequest)
+	for _, r := range reqs {
+		if !taken[r.URL] {
+			byRepo[r.Repo] = append(byRepo[r.Repo], r)
+		}
+	}
+	var repos []reviewGroup
+	for repo, rs := range byRepo {
+		if len(rs) < groupMin {
+			continue
+		}
+		slices.SortFunc(rs, byRepoAndNumber)
+		name := repo[strings.LastIndex(repo, "/")+1:]
+		repos = append(repos, reviewGroup{title: fmt.Sprintf("%s · %d", name, len(rs)), reqs: rs})
+		take(rs)
+	}
+
+	byTitleOf := func(a, b reviewGroup) int { return cmp.Compare(a.title, b.title) }
+	slices.SortFunc(repos, byTitleOf)
+	slices.SortFunc(fanOuts, byTitleOf)
+	for _, r := range reqs {
+		if !taken[r.URL] {
+			loose = append(loose, r)
+		}
+	}
+	return loose, append(repos, fanOuts...)
 }
 
 type reviewsResult struct {

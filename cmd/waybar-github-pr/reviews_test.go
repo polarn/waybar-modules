@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -149,6 +150,68 @@ func TestStaleReviewRequest(t *testing.T) {
 	for _, c := range cases {
 		if got := c.reviews.stale(c.n); got != c.want {
 			t.Errorf("%s: stale = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestPickerGroupsReviews(t *testing.T) {
+	req := func(repo string, n int, author, title string) ReviewRequest {
+		return ReviewRequest{Title: title, URL: fmt.Sprintf("https://github.com/%s/pull/%d", repo, n),
+			Number: n, Repo: repo, Author: author}
+	}
+	reqs := []ReviewRequest{
+		req("o/ui", 119, "ed", "feat: [UI-1] [UI-2] count failures"),
+		req("o/flux", 56, "jb", "ci: [PL-4797] Auto-merge approved Renovate PRs"),
+		req("o/releaser", 45, "jb", "ci: [PL-4798] Auto-merge approved Renovate PRs"),
+		req("o/images", 220, "jb", "ci: [PL-5215] Start a Renovate run"),
+		req("o/ui", 112, "ed", "fix: light mode"),
+		req("o/dev-tools", 221, "jb", "ci: [PL-4798] Auto-merge approved Renovate PRs"),
+		req("o/handbook", 112, "ed", "UI-8434 Decommission the key"),
+		req("o/ui", 113, "ed", "fix: deprecations link"),
+		req("o/images", 219, "dependabot", "chore(deps): bump"),
+		req("o/docs", 1, "jb", "Start a Renovate run"),
+		req("o/docs", 2, "jb", "Start a Renovate run"),
+	}
+
+	var got []string
+	for _, it := range pickerItems(PRCache{Reviews: reqs}) {
+		got = append(got, it.label)
+	}
+	want := []string{
+		"[o/images#220] ci: [PL-5215] Start a Renovate run · jb",
+		"[o/handbook#112] UI-8434 Decommission the key · ed",
+		"[o/docs#1] Start a Renovate run · jb",
+		"[o/docs#2] Start a Renovate run · jb",
+		"──── ui · 3 ",
+		"#112 fix: light mode · ed",
+		"#113 fix: deprecations link · ed",
+		"#119 feat: [UI-1] [UI-2] count failures · ed",
+		"──── ci: Auto-merge approved Renovate PRs · 3 repos ",
+		"[o/dev-tools#221] PL-4798 · jb",
+		"[o/flux#56] PL-4797 · jb",
+		"[o/releaser#45] PL-4798 · jb",
+		"──── Dependabot ",
+	}
+	if len(got) != len(want)+1 {
+		t.Fatalf("got %d rows, want %d:\n%s", len(got), len(want)+1, strings.Join(got, "\n"))
+	}
+	for i, w := range want {
+		if !strings.Contains(got[i], w) {
+			t.Errorf("row %d = %q, want it to contain %q", i, got[i], w)
+		}
+	}
+}
+
+func TestSplitTickets(t *testing.T) {
+	cases := []struct{ title, rest, tickets string }{
+		{"ci: [PL-4798] Auto-merge approved Renovate PRs", "ci: Auto-merge approved Renovate PRs", "PL-4798"},
+		{"UI-8434 Decommission the key", "Decommission the key", "UI-8434"},
+		{"feat: [UI-1] [UI-2] count", "feat: count", "UI-1 UI-2"},
+		{"Add CODEOWNERS", "Add CODEOWNERS", ""},
+	}
+	for _, c := range cases {
+		if rest, tickets := splitTickets(c.title); rest != c.rest || tickets != c.tickets {
+			t.Errorf("splitTickets(%q) = %q, %q, want %q, %q", c.title, rest, tickets, c.rest, c.tickets)
 		}
 	}
 }
