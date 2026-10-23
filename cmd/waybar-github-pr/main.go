@@ -843,7 +843,7 @@ func subjectWebURL(n Notification) string {
 // longest shape a row takes — glyph, age, `[owner/repo]` and a title — so
 // what gets ellipsized is the tail of a title rather than the part that says
 // which repo the row belongs to.
-const pickerWidth = 120
+const pickerWidth = 180
 
 const pickerMaxLines = 40
 
