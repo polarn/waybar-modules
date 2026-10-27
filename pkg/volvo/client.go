@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,30 @@ import (
 // location:read), not a broken login, so it is distinct from
 // ErrReauthNeeded.
 var ErrForbidden = errors.New("volvo: access denied (missing API scope?)")
+
+// ErrRateLimited is a 429 from the API or the token endpoint; errors.As
+// a *RateLimitError for the server's Retry-After.
+var ErrRateLimited = errors.New("volvo: rate limited")
+
+// RateLimitError carries Retry-After, zero when the server sent none.
+type RateLimitError struct {
+	RetryAfter time.Duration
+	Detail     string
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("%v (retry after %s): %s", ErrRateLimited, e.RetryAfter, e.Detail)
+}
+
+func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
+
+func rateLimited(h http.Header, detail string) *RateLimitError {
+	e := &RateLimitError{Detail: detail}
+	if secs, err := strconv.Atoi(strings.TrimSpace(h.Get("Retry-After"))); err == nil && secs > 0 {
+		e.RetryAfter = time.Duration(secs) * time.Second
+	}
+	return e
+}
 
 // Client is an authenticated Volvo cloud API client. BaseURL and
 // TokenURL default to the production endpoints; tests override them
@@ -110,10 +135,10 @@ func (c *Client) EnergyState(vin string) (*EnergyState, error) {
 
 // Location is the Location API v1 GPS fix.
 type Location struct {
-	Lat       float64
-	Lon       float64
-	Heading   string // degrees as sent by the API; may be empty
-	Timestamp time.Time
+	Lat       float64   `json:"lat"`
+	Lon       float64   `json:"lon"`
+	Heading   string    `json:"heading,omitempty"` // degrees as sent by the API; may be empty
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // Age is how stale the fix is — like energy data, it only moves when
@@ -205,6 +230,73 @@ func (c *Client) Command(vin, command string) (*CommandResult, error) {
 	return &out.Data, nil
 }
 
+// Snapshot is everything one poll reads about a vehicle; it is also the
+// wire format of volvo-exporter's /state.
+type Snapshot struct {
+	VIN       string           `json:"vin"`
+	FetchedAt time.Time        `json:"fetched_at"`
+	Energy    *EnergyState     `json:"energy"`
+	Location  *Location        `json:"location,omitempty"`
+	Connected map[string]CVMap `json:"connected,omitempty"`
+}
+
+// FetchSnapshot reads energy state, then location and the given
+// Connected Vehicle leaves concurrently. Only the energy read is
+// required. The rest is best-effort: ErrForbidden drops a part silently,
+// and any other error goes to soft and leaves that part absent.
+func (c *Client) FetchSnapshot(vin string, leaves []string, soft func(error)) (*Snapshot, error) {
+	energy, err := c.EnergyState(vin)
+	if err != nil {
+		return nil, err
+	}
+	snap := &Snapshot{
+		VIN:       vin,
+		FetchedAt: time.Now(),
+		Energy:    energy,
+		Connected: make(map[string]CVMap, len(leaves)),
+	}
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	report := func(err error) {
+		if errors.Is(err, ErrForbidden) {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		soft(err)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		loc, err := c.Location(vin)
+		if err != nil {
+			report(err)
+			return
+		}
+		mu.Lock()
+		snap.Location = loc
+		mu.Unlock()
+	}()
+	for _, leaf := range leaves {
+		wg.Add(1)
+		go func(leaf string) {
+			defer wg.Done()
+			m, err := c.Connected(vin, leaf)
+			if err != nil {
+				report(err)
+				return
+			}
+			mu.Lock()
+			snap.Connected[leaf] = m
+			mu.Unlock()
+		}(leaf)
+	}
+	wg.Wait()
+	return snap, nil
+}
+
 // Vehicles lists the VINs registered to the authenticated Volvo ID.
 func (c *Client) Vehicles() ([]string, error) {
 	var out struct {
@@ -235,7 +327,7 @@ func (c *Client) call(method, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	status, body, err := c.doReq(method, path, tok)
+	status, hdr, body, err := c.doReq(method, path, tok)
 	if err != nil {
 		return err
 	}
@@ -243,9 +335,12 @@ func (c *Client) call(method, path string, out any) error {
 		if tok, err = c.accessToken(true); err != nil {
 			return err
 		}
-		if status, body, err = c.doReq(method, path, tok); err != nil {
+		if status, hdr, body, err = c.doReq(method, path, tok); err != nil {
 			return err
 		}
+	}
+	if status == http.StatusTooManyRequests {
+		return fmt.Errorf("%s %s: %w", method, path, rateLimited(hdr, truncate(body, 200)))
 	}
 	if status == http.StatusForbidden {
 		return fmt.Errorf("%s %s: %w", method, path, ErrForbidden)
@@ -256,21 +351,21 @@ func (c *Client) call(method, path string, out any) error {
 	return json.Unmarshal(body, out)
 }
 
-func (c *Client) doReq(method, path, token string) (int, []byte, error) {
+func (c *Client) doReq(method, path, token string) (int, http.Header, []byte, error) {
 	req, err := http.NewRequest(method, c.BaseURL+path, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("vcc-api-key", c.Config.VccAPIKey)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, body, err
+	return resp.StatusCode, resp.Header, body, err
 }
 
 // accessToken returns a valid bearer token, refreshing (and rotating
@@ -302,9 +397,9 @@ func (c *Client) accessToken(force bool) (string, error) {
 }
 
 // refreshGrant redeems the refresh token. Volvo answers 400 (typically
-// error=invalid_grant) once the personal-app consent grant lapses or a
-// rotated token is replayed — both mean the user must re-auth, so any
-// 4xx maps to ErrReauthNeeded.
+// error=invalid_grant) once the consent grant lapses or a rotated token
+// is replayed — both mean the user must re-auth, so any 4xx other than
+// 429 maps to ErrReauthNeeded.
 func (c *Client) refreshGrant(refreshToken string) (*Tokens, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
@@ -324,6 +419,9 @@ func (c *Client) refreshGrant(refreshToken string) (*Tokens, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("token refresh: %w", rateLimited(resp.Header, truncate(body, 200)))
+	}
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		return nil, fmt.Errorf("%w (HTTP %d: %s)", ErrReauthNeeded, resp.StatusCode, truncate(body, 200))
 	}

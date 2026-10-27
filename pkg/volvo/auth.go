@@ -25,25 +25,13 @@ import (
 // public forwarding page (docs/volvo-callback) that bounces the browser
 // on to the localhost listener.
 func Authenticate(cfg *Config, openBrowser bool) (*Tokens, error) {
-	verifier, err := generateCodeVerifier()
+	ar, err := NewAuthRequest(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("generate verifier: %w", err)
-	}
-	state, err := randomState()
-	if err != nil {
-		return nil, fmt.Errorf("generate state: %w", err)
-	}
-	port := cfg.RedirectPort
-	if port == 0 {
-		port = DefaultRedirectPort
-	}
-	redirect := fmt.Sprintf("http://localhost:%d/callback", port)
-	if cfg.RedirectURI != "" {
-		redirect = cfg.RedirectURI
+		return nil, err
 	}
 
 	// Bind before opening the browser so a taken port fails fast.
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.CallbackPort()))
 	if err != nil {
 		return nil, fmt.Errorf("listen on callback port: %w", err)
 	}
@@ -55,26 +43,60 @@ func Authenticate(cfg *Config, openBrowser bool) (*Tokens, error) {
 	resCh := make(chan result, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		switch {
-		case q.Get("state") != state:
-			http.Error(w, "state mismatch", http.StatusBadRequest)
-			resCh <- result{err: errors.New("callback state mismatch")}
-		case q.Get("error") != "":
-			http.Error(w, q.Get("error"), http.StatusBadRequest)
-			resCh <- result{err: fmt.Errorf("authorization denied: %s (%s)", q.Get("error"), q.Get("error_description"))}
-		case q.Get("code") == "":
-			http.Error(w, "missing code", http.StatusBadRequest)
-			resCh <- result{err: errors.New("callback missing code")}
-		default:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, "<html><body><p>Authenticated — you can close this tab.</p></body></html>")
-			resCh <- result{code: q.Get("code")}
+		code, err := ar.CallbackCode(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			resCh <- result{err: err}
+			return
 		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<html><body><p>Authenticated — you can close this tab.</p></body></html>")
+		resCh <- result{code: code}
 	})
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
 	defer srv.Close()
+
+	if openBrowser {
+		_ = exec.Command("xdg-open", ar.URL).Start()
+	}
+	fmt.Fprintf(os.Stderr, "Complete the Volvo ID login in your browser. If none opened, visit:\n\n%s\n\n", ar.URL)
+
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			return nil, res.err
+		}
+		return ar.Exchange(cfg, res.code)
+	case <-time.After(5 * time.Minute):
+		return nil, errors.New("timed out waiting for browser login")
+	}
+}
+
+// AuthRequest is one pending authorization-code + PKCE login: send the
+// browser to URL, then pass the callback's code to Exchange.
+type AuthRequest struct {
+	URL      string
+	State    string
+	verifier string
+	redirect string
+}
+
+// NewAuthRequest starts a login against the redirect URI registered on
+// the portal app (cfg.RedirectURI, else the legacy localhost callback).
+func NewAuthRequest(cfg *Config) (*AuthRequest, error) {
+	verifier, err := generateCodeVerifier()
+	if err != nil {
+		return nil, fmt.Errorf("generate verifier: %w", err)
+	}
+	state, err := randomState()
+	if err != nil {
+		return nil, fmt.Errorf("generate state: %w", err)
+	}
+	redirect := fmt.Sprintf("http://localhost:%d/callback", cfg.CallbackPort())
+	if cfg.RedirectURI != "" {
+		redirect = cfg.RedirectURI
+	}
 
 	q := url.Values{}
 	q.Set("response_type", "code")
@@ -84,22 +106,32 @@ func Authenticate(cfg *Config, openBrowser bool) (*Tokens, error) {
 	q.Set("state", state)
 	q.Set("code_challenge", codeChallenge(verifier))
 	q.Set("code_challenge_method", "S256")
-	authURL := authorizeURL + "?" + q.Encode()
+	return &AuthRequest{
+		URL:      authorizeURL + "?" + q.Encode(),
+		State:    state,
+		verifier: verifier,
+		redirect: redirect,
+	}, nil
+}
 
-	if openBrowser {
-		_ = exec.Command("xdg-open", authURL).Start()
+// CallbackCode validates a /callback request against this login and
+// returns its authorization code.
+func (a *AuthRequest) CallbackCode(r *http.Request) (string, error) {
+	q := r.URL.Query()
+	switch {
+	case q.Get("state") != a.State:
+		return "", errors.New("callback state mismatch")
+	case q.Get("error") != "":
+		return "", fmt.Errorf("authorization denied: %s (%s)", q.Get("error"), q.Get("error_description"))
+	case q.Get("code") == "":
+		return "", errors.New("callback missing code")
 	}
-	fmt.Fprintf(os.Stderr, "Complete the Volvo ID login in your browser. If none opened, visit:\n\n%s\n\n", authURL)
+	return q.Get("code"), nil
+}
 
-	select {
-	case res := <-resCh:
-		if res.err != nil {
-			return nil, res.err
-		}
-		return exchangeCode(cfg, res.code, verifier, redirect)
-	case <-time.After(5 * time.Minute):
-		return nil, errors.New("timed out waiting for browser login")
-	}
+// Exchange swaps the callback's authorization code for tokens.
+func (a *AuthRequest) Exchange(cfg *Config, code string) (*Tokens, error) {
+	return exchangeCode(cfg, code, a.verifier, a.redirect)
 }
 
 // exchangeCode swaps the authorization code for tokens. Like refresh,

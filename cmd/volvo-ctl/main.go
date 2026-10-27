@@ -3,7 +3,7 @@
 // feeds the custom/volvo pill.
 //
 // Subcommands:
-//   volvo-ctl auth       # one-time (and ~weekly) browser login, stores tokens
+//   volvo-ctl auth       # one-time browser login (again if the grant lapses)
 //   volvo-ctl vehicles   # emit JSONL of VINs on the account
 //   volvo-ctl status     # human-readable battery/charging state
 //   volvo-ctl location   # last GPS fix + map links (needs location:read)
@@ -12,6 +12,8 @@
 //
 // Config: ~/.config/volvo/config.json {client_id, client_secret,
 // vcc_api_key, vin?}; tokens are managed in ~/.config/volvo/tokens.json.
+// With VOLVO_EXPORTER_URL set, status, location and waybar read
+// volvo-exporter's /state instead of calling the API.
 package main
 
 import (
@@ -25,7 +27,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/polarn/waybar-modules/pkg/volvo"
@@ -43,6 +44,8 @@ const (
 // the tooltip's anomaly lines; `status` additionally pulls odometer
 // and trip statistics.
 var connectedLeaves = []string{"doors", "windows", "engine-status", "tyres", "warnings", "diagnostics"}
+
+var statusLeaves = append([]string{"odometer", "statistics"}, connectedLeaves...)
 
 type globalFlags struct {
 	configDir string
@@ -126,6 +129,29 @@ func resolveVIN(g globalFlags, cfg *volvo.Config, c *volvo.Client) (string, erro
 	}
 }
 
+// snapshot reads the vehicle from volvo-exporter when VOLVO_EXPORTER_URL
+// is set, else straight from the API.
+func snapshot(g globalFlags, leaves []string) (*volvo.Snapshot, string, error) {
+	if base := os.Getenv("VOLVO_EXPORTER_URL"); base != "" {
+		st, err := volvo.FetchExporterState(base)
+		if err != nil {
+			return nil, "", err
+		}
+		snap, err := st.Current()
+		return snap, st.LastError, err
+	}
+	cfg, c, err := loadAll(g)
+	if err != nil {
+		return nil, "", err
+	}
+	vin, err := resolveVIN(g, cfg, c)
+	if err != nil {
+		return nil, "", err
+	}
+	snap, err := c.FetchSnapshot(vin, leaves, func(err error) { fmt.Fprintln(os.Stderr, err) })
+	return snap, "", err
+}
+
 func cmdAuth(args []string) {
 	var g globalFlags
 	var redirectPort int
@@ -195,24 +221,15 @@ func cmdStatus(args []string) {
 	addGlobal(fs, &g)
 	fs.Parse(args)
 
-	cfg, c, err := loadAll(g)
+	snap, _, err := snapshot(g, statusLeaves)
 	if err != nil {
 		fatal("%v", err)
 	}
-	vin, err := resolveVIN(g, cfg, c)
-	if err != nil {
-		fatal("%v", err)
-	}
-	st, err := c.EnergyState(vin)
-	if err != nil {
-		fatal("energy state: %v", err)
-	}
-	fmt.Printf("VIN: %s\n", vin)
-	for _, line := range summaryLines(st) {
+	fmt.Printf("VIN: %s\n", snap.VIN)
+	for _, line := range summaryLines(snap.Energy) {
 		fmt.Println(line)
 	}
-	cv := fetchConnected(c, vin, append([]string{"odometer", "statistics"}, connectedLeaves...))
-	for _, line := range statusCarLines(cv) {
+	for _, line := range statusCarLines(snap.Connected) {
 		fmt.Println(line)
 	}
 }
@@ -225,21 +242,7 @@ func cmdLocation(args []string) {
 	fs.BoolVar(&open, "open", false, "Open the position on OpenStreetMap (xdg-open)")
 	fs.Parse(args)
 
-	cfg, c, err := loadAll(g)
-	if err != nil {
-		fatal("%v", err)
-	}
-	vin, err := resolveVIN(g, cfg, c)
-	if err != nil {
-		fatal("%v", err)
-	}
-	loc, err := c.Location(vin)
-	if err != nil {
-		if errors.Is(err, volvo.ErrForbidden) {
-			fatal("location: %v\nhint: the app lacks the location:read scope — add it on developer.volvocars.com, then re-run: volvo-ctl auth", err)
-		}
-		fatal("location: %v", err)
-	}
+	vin, loc := locate(g)
 	osm := fmt.Sprintf("https://www.openstreetmap.org/?mlat=%.6f&mlon=%.6f#map=16/%.6f/%.6f",
 		loc.Lat, loc.Lon, loc.Lat, loc.Lon)
 	fmt.Printf("VIN: %s\n", vin)
@@ -255,6 +258,35 @@ func cmdLocation(args []string) {
 	if open {
 		_ = exec.Command("xdg-open", osm).Start()
 	}
+}
+
+func locate(g globalFlags) (string, *volvo.Location) {
+	if os.Getenv("VOLVO_EXPORTER_URL") != "" {
+		snap, _, err := snapshot(g, nil)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if snap.Location == nil {
+			fatal("location: volvo-exporter has no GPS fix")
+		}
+		return snap.VIN, snap.Location
+	}
+	cfg, c, err := loadAll(g)
+	if err != nil {
+		fatal("%v", err)
+	}
+	vin, err := resolveVIN(g, cfg, c)
+	if err != nil {
+		fatal("%v", err)
+	}
+	loc, err := c.Location(vin)
+	if err != nil {
+		if errors.Is(err, volvo.ErrForbidden) {
+			fatal("location: %v\nhint: the app lacks the location:read scope — add it on developer.volvocars.com, then re-run: volvo-ctl auth", err)
+		}
+		fatal("location: %v", err)
+	}
+	return vin, loc
 }
 
 // cmdClimate is the tool's only car-actuating command; everything else
@@ -313,7 +345,7 @@ func cmdWaybar(args []string) {
 }
 
 func buildWaybar(g globalFlags) waybar.Waybar {
-	cfg, c, err := loadAll(g)
+	snap, lastErr, err := snapshot(g, connectedLeaves)
 	if err != nil {
 		if errors.Is(err, volvo.ErrNoConfig) {
 			return waybar.Waybar{
@@ -325,16 +357,9 @@ func buildWaybar(g globalFlags) waybar.Waybar {
 					"(developer.volvocars.com), then run: volvo-ctl auth\n\n" + escapePango(err.Error()),
 			}
 		}
-		return errPill(err)
-	}
-	vin, err := resolveVIN(g, cfg, c)
-	if err != nil {
 		return authOrErrPill(err)
 	}
-	st, err := c.EnergyState(vin)
-	if err != nil {
-		return authOrErrPill(err)
-	}
+	st := snap.Energy
 	if !st.BatteryChargeLevel.OK() {
 		return errPill(fmt.Errorf("batteryChargeLevel unavailable (status %s, code %s)",
 			st.BatteryChargeLevel.Status, st.BatteryChargeLevel.Code))
@@ -350,16 +375,16 @@ func buildWaybar(g globalFlags) waybar.Waybar {
 	if charging {
 		icon += iconBolt
 	}
-	tooltip := "<b>Volvo XC40 · " + escapePango(vin) + "</b>\n" + escapePango(strings.Join(summaryLines(st), "\n"))
-	// Location is garnish: any failure (typically ErrForbidden before
-	// the scope/consent exists) leaves the pill battery-only.
-	if loc, lerr := c.Location(vin); lerr == nil {
-		tooltip += "\n" + escapePango(strings.Join(locationLines(loc), "\n"))
-	} else if !errors.Is(lerr, volvo.ErrForbidden) {
-		fmt.Fprintln(os.Stderr, lerr)
+	tooltip := "<b>Volvo XC40 · " + escapePango(snap.VIN) + "</b>\n" + escapePango(strings.Join(summaryLines(st), "\n"))
+	if snap.Location != nil {
+		tooltip += "\n" + escapePango(strings.Join(locationLines(snap.Location), "\n"))
 	}
-	if lines := carLines(fetchConnected(c, vin, connectedLeaves)); len(lines) > 0 {
+	if lines := carLines(snap.Connected); len(lines) > 0 {
 		tooltip += "\n" + escapePango(strings.Join(lines, "\n"))
+	}
+	if lastErr != "" {
+		tooltip += "\n" + escapePango(fmt.Sprintf("Exporter fetched %s ago; last poll failed: %s",
+			formatAge(time.Since(snap.FetchedAt)), lastErr))
 	}
 	return waybar.Waybar{
 		Text:    fmt.Sprintf("%s %d%%", icon, pct),
@@ -425,36 +450,6 @@ func summaryLines(st *volvo.EnergyState) []string {
 		lines = append(lines, fmt.Sprintf("Data age: %s (car reports opportunistically)", formatAge(age)))
 	}
 	return lines
-}
-
-// fetchConnected pulls the given Connected Vehicle leaves concurrently.
-// Each leaf is garnish: a missing scope (ErrForbidden — e.g. an older
-// portal app) drops the leaf silently, other errors are logged to
-// stderr, and callers just see an absent map entry either way.
-func fetchConnected(c *volvo.Client, vin string, leaves []string) map[string]volvo.CVMap {
-	cv := make(map[string]volvo.CVMap, len(leaves))
-	var (
-		mu sync.Mutex
-		wg sync.WaitGroup
-	)
-	for _, leaf := range leaves {
-		wg.Add(1)
-		go func(leaf string) {
-			defer wg.Done()
-			m, err := c.Connected(vin, leaf)
-			if err != nil {
-				if !errors.Is(err, volvo.ErrForbidden) {
-					fmt.Fprintln(os.Stderr, err)
-				}
-				return
-			}
-			mu.Lock()
-			cv[leaf] = m
-			mu.Unlock()
-		}(leaf)
-	}
-	wg.Wait()
-	return cv
 }
 
 // openParts collects the human-readable names of open doors/windows.
@@ -655,6 +650,16 @@ func formatAge(d time.Duration) string {
 }
 
 func authOrErrPill(err error) waybar.Waybar {
+	if errors.Is(err, volvo.ErrExporterReauth) {
+		fmt.Fprintln(os.Stderr, err)
+		return waybar.Waybar{
+			Text:  iconCar + " auth",
+			Class: "reauth",
+			ToolTip: "<b>volvo-exporter login needed</b>\n" +
+				"kubectl -n volvo-exporter port-forward deploy/volvo-exporter 20999\n" +
+				"then open http://localhost:20999/auth",
+		}
+	}
 	if errors.Is(err, volvo.ErrNoTokens) || errors.Is(err, volvo.ErrReauthNeeded) {
 		fmt.Fprintln(os.Stderr, err)
 		return waybar.Waybar{

@@ -12,10 +12,9 @@ import (
 // ErrNoTokens means no tokens.json exists yet — run `volvo-ctl auth`.
 var ErrNoTokens = errors.New("volvo: no tokens — run 'volvo-ctl auth'")
 
-// ErrReauthNeeded means the refresh token was rejected. Personal
-// developer-portal apps have a limited consent grant (~a week), after
-// which refresh stops working and the user must run `volvo-ctl auth`
-// again in a browser.
+// ErrReauthNeeded means the refresh token was rejected: the consent
+// grant lapsed or a spent token was replayed. Only a browser login
+// (`volvo-ctl auth`, or volvo-exporter's /auth) recovers.
 var ErrReauthNeeded = errors.New("volvo: refresh token rejected — run 'volvo-ctl auth' again")
 
 // Tokens is the persisted OAuth state. Expiry is absolute, computed from

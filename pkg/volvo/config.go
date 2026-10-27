@@ -59,6 +59,14 @@ type Config struct {
 	RedirectURI string `json:"redirect_uri,omitempty"`
 }
 
+// CallbackPort is the localhost port the login callback is served on.
+func (c *Config) CallbackPort() int {
+	if c.RedirectPort != 0 {
+		return c.RedirectPort
+	}
+	return DefaultRedirectPort
+}
+
 // DefaultDir returns ~/.config/volvo.
 func DefaultDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -84,9 +92,14 @@ func LoadConfig(dir string) (*Config, error) {
 		return nil, err
 	}
 
+	return ParseConfig(data, path)
+}
+
+// ParseConfig validates config.json contents; source names them in errors.
+func ParseConfig(data []byte, source string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", source, err)
 	}
 	for name, v := range map[string]string{
 		"client_id":     cfg.ClientID,
@@ -94,7 +107,7 @@ func LoadConfig(dir string) (*Config, error) {
 		"vcc_api_key":   cfg.VccAPIKey,
 	} {
 		if v == "" || strings.HasPrefix(v, "YOUR_") {
-			return nil, fmt.Errorf("%w: %s missing %s", ErrNoConfig, path, name)
+			return nil, fmt.Errorf("%w: %s missing %s", ErrNoConfig, source, name)
 		}
 	}
 	return &cfg, nil

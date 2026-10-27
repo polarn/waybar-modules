@@ -1,12 +1,14 @@
 package volvo
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -472,5 +474,131 @@ func TestLoadConfigStates(t *testing.T) {
 	}
 	if cfg.VIN != "V1" {
 		t.Errorf("vin = %q", cfg.VIN)
+	}
+}
+
+func TestRateLimitedAPI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "42")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"status":429}`)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	_, err := c.EnergyState("VIN123")
+	var rl *RateLimitError
+	if !errors.As(err, &rl) || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want a RateLimitError", err)
+	}
+	if rl.RetryAfter != 42*time.Second {
+		t.Errorf("RetryAfter = %s, want 42s", rl.RetryAfter)
+	}
+}
+
+func TestRateLimitedRefreshIsNotReauth(t *testing.T) {
+	tok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer tok.Close()
+
+	c := testClient(t, "http://unused.invalid", tok.URL)
+	_, err := c.accessToken(true)
+	if errors.Is(err, ErrReauthNeeded) {
+		t.Fatalf("429 from the token endpoint mapped to ErrReauthNeeded: %v", err)
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("err = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestFetchSnapshot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/energy/v2/vehicles/VIN123/state":
+			fmt.Fprint(w, xc40Fixture)
+		case "/location/v1/vehicles/VIN123/location":
+			fmt.Fprint(w, locationFixture)
+		case "/connected-vehicle/v2/vehicles/VIN123/doors":
+			fmt.Fprint(w, doorsFixture)
+		case "/connected-vehicle/v2/vehicles/VIN123/tyres":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	var soft []error
+	snap, err := c.FetchSnapshot("VIN123", []string{"doors", "tyres", "windows"}, func(err error) {
+		soft = append(soft, err)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pct, _ := snap.Energy.BatteryChargeLevel.Int(); pct != 53 {
+		t.Errorf("battery = %d, want 53", pct)
+	}
+	if snap.Location == nil || snap.Location.Lat != 59.32513 {
+		t.Errorf("location = %+v", snap.Location)
+	}
+	if _, ok := snap.Connected["doors"]; !ok {
+		t.Error("doors missing")
+	}
+	if _, ok := snap.Connected["tyres"]; ok {
+		t.Error("forbidden tyres leaf should be absent")
+	}
+	if len(soft) != 1 {
+		t.Errorf("soft errors = %v, want only the windows 500", soft)
+	}
+
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Snapshot
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if pct, _ := back.Energy.BatteryChargeLevel.Int(); pct != 53 || !back.Energy.BatteryChargeLevel.OK() {
+		t.Errorf("round-tripped battery = %+v", back.Energy.BatteryChargeLevel)
+	}
+	if back.Energy.ChargingPower.Unit != "watts" {
+		t.Errorf("round-tripped charging power unit = %q", back.Energy.ChargingPower.Unit)
+	}
+	if string(back.Connected["doors"]["centralLock"].Value) != "LOCKED" {
+		t.Errorf("round-tripped centralLock = %q", back.Connected["doors"]["centralLock"].Value)
+	}
+}
+
+func TestEnergyFailureFailsSnapshot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL, srv.URL+"/token")
+	if _, err := c.FetchSnapshot("VIN123", nil, func(error) {}); err == nil {
+		t.Error("want an error when the energy read fails")
+	}
+}
+
+func TestAuthRequestCallback(t *testing.T) {
+	cfg := &Config{ClientID: "id", ClientSecret: "secret", VccAPIKey: "key", RedirectURI: "https://example.invalid/cb/"}
+	ar, err := NewAuthRequest(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ar.URL, "redirect_uri=https%3A%2F%2Fexample.invalid%2Fcb%2F") {
+		t.Errorf("authorize URL lacks the registered redirect: %s", ar.URL)
+	}
+	ok := httptest.NewRequest(http.MethodGet, "/callback?code=C1&state="+ar.State, nil)
+	if code, err := ar.CallbackCode(ok); err != nil || code != "C1" {
+		t.Errorf("CallbackCode = %q, %v", code, err)
+	}
+	bad := httptest.NewRequest(http.MethodGet, "/callback?code=C1&state=forged", nil)
+	if _, err := ar.CallbackCode(bad); err == nil {
+		t.Error("forged state accepted")
 	}
 }

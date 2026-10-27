@@ -31,13 +31,14 @@ Bar modules (daemon, prints waybar JSON on an interval):
 CLIs (one-shot):
 
 - `cmd/bambu-ctl/` - Bambu Lab cloud CLI (`login`/`status`/`waybar`/`pause`/`resume`/`toggle`/`stop`/`speed`/`light`); feeds the custom/p2s printer pill
-- `cmd/volvo-ctl/` - Volvo cloud CLI (`auth`/`vehicles`/`status`/`location`/`climate`/`waybar`); feeds the custom/volvo pill
+- `cmd/volvo-ctl/` - Volvo cloud CLI (`auth`/`vehicles`/`status`/`location`/`climate`/`waybar`); feeds the custom/volvo pill. With `VOLVO_EXPORTER_URL` set, `status`/`location`/`waybar` read volvo-exporter's `/state` instead of the API
 - `cmd/tradfri-ctl/` - DIRIGERA control CLI (toggle/set lights, rotate Sonos scenes). Containerised for the flux `tradfri` CronJob.
 - `cmd/waybar-tradfri-auth/` - One-time DIRIGERA pairing; writes the token the other two read. Named `waybar-*` for historical reasons — it is a helper, not a bar module.
 
 Service:
 
 - `cmd/bambu-exporter/` - Holds one cloud MQTT subscription open; serves Prometheus metrics, a JSON state endpoint and a status page. Deployed via the flux `bambu-exporter` app.
+- `cmd/volvo-exporter/` - Polls the Volvo API every 5 min as the sole holder of the refresh token; serves Prometheus metrics, `/state` for the pill, and a loopback-only login. Deployed via the flux `volvo-exporter` app.
 
 Packages:
 
@@ -63,7 +64,7 @@ Every consumer lives in chezmoi (`~/.local/share/chezmoi`). Its `CLAUDE.md` has 
 - `make build-swiftbar` / `make install-swiftbar` - Same flow but only for the SwiftBar-enabled subset (currently `waybar-github-pr`, `waybar-wiim-nowplaying`). Used on macOS where the Linux-only modules (hwmon temps, tradfri, etc.) wouldn't compile or be useful.
 - `make clean` - Removes `./build/`
 
-**`bambu-exporter` is deliberately not in `make build`.** It is a server, and `make install` copies everything in `./build/*` into `~/.local/bin` — not where a server belongs. It is built by `container-images/bambu-exporter/Dockerfile` from a pinned `SRC_REF`, so shipping a change to it means bumping that SHA and re-pinning the resulting digest in flux. Build it directly with `go build ./cmd/bambu-exporter` when working on it locally.
+**`bambu-exporter` and `volvo-exporter` are deliberately not in `make build`.** It is a server, and `make install` copies everything in `./build/*` into `~/.local/bin` — not where a server belongs. It is built by `container-images/bambu-exporter/Dockerfile` from a pinned `SRC_REF`, so shipping a change to it means bumping that SHA and re-pinning the resulting digest in flux. Build it directly with `go build ./cmd/bambu-exporter` when working on it locally.
 
 Note `make install` does a blind `pkill -x` on every binary name it installs, so it also kills a locally-running exporter.
 
@@ -290,6 +291,26 @@ Two other own-goals promtool will not always catch: two samples of one family wi
 ### Token expiry
 
 Renewal is interactive, so an unattended deployment breaks about quarterly. `bambulab_cloud_auth_ok` goes to 0 when the cloud rejects the token and the process keeps serving rather than crash-looping (a crash loop would hide the reason, and retrying in-process cannot help — the token is baked into the environment until the pod restarts). `TokenExpiry()` reads the JWT `exp` claim, but **not every token is a JWT**: the emailed-code login flow mints opaque ones, and this printer's account has one, so `bambulab_cloud_token_age_seconds` is the portable early warning.
+
+## volvo-exporter module details
+
+### One token holder
+
+Volvo rotates the refresh token on every refresh (single-use) and access tokens last 5 minutes, so every poll refreshes. Two processes holding copies of `tokens.json` will race: whichever refreshes second gets `invalid_grant` and the chain needs a browser login. The `TokenStore` flock only serialises processes that share one file. So the exporter owns the token on its PVC, the pill reads `/state`, and the Deployment uses `strategy: Recreate` so two pods never overlap. Never seed the pod from a *copy* of a live `~/.config/volvo/tokens.json`; log in through the exporter instead. A local test run is safe only with `VOLVO_DATA_DIR=~/.config/volvo` (the same file, the same lock).
+
+Shutdown waits up to 25 s for an in-flight poll rather than cancelling it: a refresh the server has accepted but the process never saved spends the token.
+
+### Login
+
+`/auth` and `/callback` listen on `127.0.0.1:20999` inside the pod, so they are reachable only through `kubectl port-forward`, which matches the hardcoded target of the `docs/volvo-callback` forwarding page. Run `kubectl -n volvo-exporter port-forward deploy/volvo-exporter 20999`, open `http://localhost:20999/auth`, and log in; the callback saves the tokens and triggers an immediate poll. `volvo_auth_ok` goes to 0 when the refresh token is rejected, and the poller keeps re-reading `tokens.json` at the normal interval.
+
+### Polling and quota
+
+Each poll is 10 requests (energy, location, 8 Connected Vehicle leaves): 2,880/day at the 5 min default, against the app's 10,000/day and 100/min. Only the energy read is required; the other parts are best-effort and counted in `volvo_partial_errors_total`. A 429 (`RateLimitError`, including from the token endpoint, which must not be read as a lapsed grant) or other failure doubles the wait up to 1 h, or longer if `Retry-After` says so.
+
+### Metrics
+
+Same rules as bambu-exporter: hand-rolled text, base units (distances in `_meters`; promtool rejects `_kilometers`), and a metric only when the API reported the field (`chargingPower` is `PROPERTY_NOT_FOUND` when idle). Location is in `/state` for the pill but deliberately not exported to Prometheus.
 
 ## Adding a new command
 
