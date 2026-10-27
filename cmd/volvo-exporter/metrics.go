@@ -144,6 +144,12 @@ func collect(v view) string {
 		e.counter("volvo_polls_total", "Polls by result, since the exporter started.", v.polls[r], "result", r)
 	}
 	e.counter("volvo_partial_errors_total", "Failed location or Connected Vehicle reads in otherwise good polls.", v.softErrors)
+	for _, r := range []struct {
+		result string
+		n      float64
+	}{{"ok", v.fastOK}, {"error", v.fastErrors}} {
+		e.counter("volvo_fast_polls_total", "Doors, windows and engine re-reads between polls while the car is awake, by result.", r.n, "result", r.result)
+	}
 
 	s := v.snap
 	if s == nil {
@@ -248,6 +254,11 @@ func collect(v view) string {
 				continue
 			}
 			g("volvo_warning", "1 while a tyre, bulb or service warning is active.", bool01(st != "NO_WARNING"), "source", leaf, "name", k)
+		}
+	}
+	for _, leaf := range leaves {
+		if t := newestReport(cv, leaf); !t.IsZero() {
+			g("volvo_reported_timestamp_seconds", "When the car last reported this Connected Vehicle resource to Volvo's cloud.", float64(t.Unix()), "leaf", leaf)
 		}
 	}
 	g("volvo_snapshot_timestamp_seconds", "When the exporter fetched the data above.", float64(s.FetchedAt.Unix()))

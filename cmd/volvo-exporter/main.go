@@ -8,7 +8,8 @@
 //
 // Env: VOLVO_CONFIG_JSON (config.json contents, vin required),
 // VOLVO_DATA_DIR (holds tokens.json, default /data), VOLVO_INTERVAL
-// (default 5m).
+// (default 5m), VOLVO_FAST_INTERVAL (doors, windows and engine while
+// the car is awake, default 1m, 0 turns it off).
 package main
 
 import (
@@ -17,10 +18,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,7 +31,12 @@ import (
 	"github.com/polarn/waybar-modules/pkg/volvo"
 )
 
-var leaves = []string{"doors", "windows", "engine-status", "tyres", "warnings", "diagnostics", "odometer", "statistics"}
+var (
+	leaves     = []string{"doors", "windows", "engine-status", "tyres", "warnings", "diagnostics", "odometer", "statistics"}
+	fastLeaves = []string{"doors", "windows", "engine-status"}
+)
+
+const awakeFor = 10 * time.Minute
 
 func main() {
 	log.SetFlags(0)
@@ -49,9 +57,15 @@ func main() {
 			log.Fatalf("volvo-exporter: VOLVO_INTERVAL %q: want a duration of at least 1m", v)
 		}
 	}
+	fast := time.Minute
+	if v := os.Getenv("VOLVO_FAST_INTERVAL"); v != "" {
+		if fast, err = time.ParseDuration(v); err != nil || (fast != 0 && (fast < 30*time.Second || fast >= interval)) {
+			log.Fatalf("volvo-exporter: VOLVO_FAST_INTERVAL %q: want 0 (off) or at least 30s and below VOLVO_INTERVAL", v)
+		}
+	}
 	store := &volvo.TokenStore{Path: filepath.Join(envOr("VOLVO_DATA_DIR", "/data"), "tokens.json")}
 
-	p := newPoller(volvo.NewClient(cfg, store), cfg.VIN, interval)
+	p := newPoller(volvo.NewClient(cfg, store), cfg.VIN, interval, fast)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	done := make(chan struct{})
@@ -127,24 +141,29 @@ type view struct {
 	retryUntil time.Time
 	polls      map[string]float64
 	softErrors float64
+	fastOK     float64
+	fastErrors float64
 }
 
 type poller struct {
 	client   *volvo.Client
 	vin      string
 	interval time.Duration
+	fast     time.Duration
 	kick     chan struct{}
 
 	mu       sync.Mutex
 	v        view
 	failures int
+	fastOn   bool
 }
 
-func newPoller(c *volvo.Client, vin string, interval time.Duration) *poller {
+func newPoller(c *volvo.Client, vin string, interval, fast time.Duration) *poller {
 	return &poller{
 		client:   c,
 		vin:      vin,
 		interval: interval,
+		fast:     fast,
 		kick:     make(chan struct{}, 1),
 		v:        view{authOK: true, polls: map[string]float64{}},
 	}
@@ -162,8 +181,17 @@ func (p *poller) view() view {
 }
 
 func (p *poller) run(ctx context.Context) {
+	next := time.Now()
 	for {
-		wait := p.poll()
+		if time.Now().Before(next) {
+			p.pollFast()
+		} else {
+			next = time.Now().Add(p.poll())
+		}
+		wait := time.Until(next)
+		if p.awake(time.Now()) && wait > p.fast {
+			wait = p.fast
+		}
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -171,9 +199,66 @@ func (p *poller) run(ctx context.Context) {
 			return
 		case <-p.kick:
 			t.Stop()
+			next = time.Now()
 		case <-t.C:
 		}
 	}
+}
+
+func (p *poller) awake(now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fastOn && p.v.snap != nil && now.Sub(newestReport(p.v.snap.Connected, fastLeaves...)) < awakeFor
+}
+
+func (p *poller) pollFast() {
+	got := make(map[string]volvo.CVMap, len(fastLeaves))
+	var err error
+	for _, leaf := range fastLeaves {
+		m, e := p.client.Connected(p.vin, leaf)
+		if errors.Is(e, volvo.ErrForbidden) {
+			continue
+		}
+		if e != nil {
+			err = e
+			break
+		}
+		got[leaf] = m
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil {
+		log.Printf("volvo-exporter: fast poll: %v", err)
+		p.v.fastErrors++
+		p.fastOn = false
+		return
+	}
+	p.v.fastOK++
+	snap := *p.v.snap
+	snap.Connected = maps.Clone(snap.Connected)
+	maps.Copy(snap.Connected, got)
+	p.v.snap = &snap
+}
+
+func newestReport(cv map[string]volvo.CVMap, leaves ...string) time.Time {
+	var t time.Time
+	for _, leaf := range leaves {
+		for _, f := range cv[leaf] {
+			if f.Timestamp.After(t) {
+				t = f.Timestamp
+			}
+		}
+	}
+	return t
+}
+
+func loginNeeded(err error) error {
+	why := "no tokens yet"
+	if !errors.Is(err, volvo.ErrNoTokens) {
+		why = "refresh token rejected" + strings.TrimPrefix(err.Error(), volvo.ErrReauthNeeded.Error())
+	}
+	return errors.New(why + "; log in through /auth on port 20999 (kubectl port-forward)")
 }
 
 func (p *poller) poll() time.Duration {
@@ -206,12 +291,16 @@ func (p *poller) poll() time.Duration {
 		rl = softLimit
 	case errors.Is(err, volvo.ErrReauthNeeded), errors.Is(err, volvo.ErrNoTokens):
 		result = "reauth"
+		p.v.lastErr = loginNeeded(err)
+		if p.v.authOK {
+			log.Printf("volvo-exporter: poll: %v", p.v.lastErr)
+		}
 		p.v.authOK = false
 	case errors.As(err, &rl):
 		result = "rate_limited"
 	}
 	p.v.polls[result]++
-	if err != nil {
+	if err != nil && result != "reauth" {
 		log.Printf("volvo-exporter: poll: %v", err)
 	}
 
@@ -229,6 +318,7 @@ func (p *poller) poll() time.Duration {
 	if wait != p.interval {
 		p.v.retryUntil = now.Add(wait)
 	}
+	p.fastOn = p.fast > 0 && result == "ok" && wait == p.interval
 	return wait
 }
 

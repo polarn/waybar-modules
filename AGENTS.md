@@ -38,7 +38,7 @@ CLIs (one-shot):
 Service:
 
 - `cmd/bambu-exporter/` - Holds one cloud MQTT subscription open; serves Prometheus metrics, a JSON state endpoint and a status page. Deployed via the flux `bambu-exporter` app.
-- `cmd/volvo-exporter/` - Polls the Volvo API every 5 min as the sole holder of the refresh token; serves Prometheus metrics, `/state` for the pill, and a loopback-only login. Deployed via the flux `volvo-exporter` app.
+- `cmd/volvo-exporter/` - Polls the Volvo API every 5 min (doors, windows and engine every minute while the car is awake) as the sole holder of the refresh token; serves Prometheus metrics, `/state` for the pill, and a loopback-only login. Deployed via the flux `volvo-exporter` app.
 
 Packages:
 
@@ -302,11 +302,13 @@ Shutdown waits up to 25 s for an in-flight poll rather than cancelling it: a ref
 
 ### Login
 
-`/auth` and `/callback` listen on `127.0.0.1:20999` inside the pod, so they are reachable only through `kubectl port-forward`, which matches the hardcoded target of the `docs/volvo-callback` forwarding page. Run `kubectl -n volvo-exporter port-forward deploy/volvo-exporter 20999`, open `http://localhost:20999/auth`, and log in; the callback saves the tokens and triggers an immediate poll. `volvo_auth_ok` goes to 0 when the refresh token is rejected, and the poller keeps re-reading `tokens.json` at the normal interval.
+`/auth` and `/callback` listen on `127.0.0.1:20999` inside the pod, so they are reachable only through `kubectl port-forward`, which matches the hardcoded target of the `docs/volvo-callback` forwarding page. Run `kubectl -n volvo-exporter port-forward deploy/volvo-exporter 20999`, open `http://localhost:20999/auth`, and log in; the callback saves the tokens and triggers an immediate poll. `volvo_auth_ok` goes to 0 when the refresh token is rejected, and the poller keeps re-reading `tokens.json` at the normal interval. It logs the login hint once, not on every poll, and words it for `/auth` rather than the `volvo-ctl auth` that `pkg/volvo`'s errors suggest.
 
 ### Polling and quota
 
 Each poll is 10 requests (energy, location, 8 Connected Vehicle leaves): 2,880/day at the 5 min default, against the app's 10,000/day and 100/min. Only the energy read is required; the other parts are best-effort and counted in `volvo_partial_errors_total`. A 429 (`RateLimitError`, including from the token endpoint, which must not be read as a lapsed grant) or other failure doubles the wait up to 1 h, or longer if `Retry-After` says so.
+
+Between full polls, while any doors, windows or engine-status field carries a car timestamp under 10 min old, the exporter re-reads those three leaves every `VOLVO_FAST_INTERVAL` (1 min) and swaps them into a copy of the snapshot. A field's `timestamp` is when the car last *reported* the leaf, shared by every field in it, not when that field changed: the car re-sends unchanged state for a few minutes after a drive and then goes quiet. So a parked, sleeping car costs nothing extra, and the worst case (always awake) is 12 more requests per 5 min, 6,336/day in total. Any fast-poll error turns fast polling off until the next good full poll, which owns the backoff. `volvo_fast_polls_total` counts them and `volvo_reported_timestamp_seconds{leaf}` exports the report times.
 
 ### Metrics
 

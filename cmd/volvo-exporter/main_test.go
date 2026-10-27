@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func testPoller(t *testing.T, srv *httptest.Server, refresh http.HandlerFunc) *p
 	tok := httptest.NewServer(refresh)
 	t.Cleanup(tok.Close)
 	c.TokenURL = tok.URL
-	return newPoller(c, "VIN1", 5*time.Minute)
+	return newPoller(c, "VIN1", 5*time.Minute, time.Minute)
 }
 
 func noRefresh(t *testing.T) http.HandlerFunc {
@@ -112,6 +113,77 @@ func TestPollReauth(t *testing.T) {
 		if !strings.Contains(out, want+"\n") {
 			t.Errorf("missing %q", want)
 		}
+	}
+	if msg := p.view().lastErr.Error(); strings.Contains(msg, "volvo-ctl") || !strings.Contains(msg, "/auth") {
+		t.Errorf("lastErr = %q, want the exporter's own login hint", msg)
+	}
+}
+
+func TestFastPollWhileAwake(t *testing.T) {
+	var tailgate atomic.Value
+	tailgate.Store("OPEN")
+	var failDoors atomic.Bool
+	var calls atomic.Int32
+	reported := time.Now().Add(-time.Minute).Truncate(time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/energy/"):
+			fmt.Fprint(w, energyBody)
+		case strings.HasSuffix(r.URL.Path, "/doors") && failDoors.Load():
+			w.WriteHeader(http.StatusBadGateway)
+		case strings.HasSuffix(r.URL.Path, "/doors"):
+			ts := reported.UTC().Format(time.RFC3339)
+			fmt.Fprintf(w, `{"data": {"centralLock": {"value": "UNLOCKED", "timestamp": %q}, "tailgate": {"value": %q, "timestamp": %q}}}`, ts, tailgate.Load(), ts)
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	p := testPoller(t, srv, noRefresh(t))
+
+	p.poll()
+	if !p.awake(time.Now()) {
+		t.Fatal("not awake although the car reported a minute ago")
+	}
+	if p.awake(time.Now().Add(awakeFor)) {
+		t.Error("still awake after awakeFor without a report")
+	}
+	before := p.view().snap
+
+	tailgate.Store("CLOSED")
+	calls.Store(0)
+	p.pollFast()
+	if n := calls.Load(); n != int32(len(fastLeaves)) {
+		t.Errorf("fast poll made %d requests, want %d", n, len(fastLeaves))
+	}
+	out := collect(p.view())
+	for _, want := range []string{
+		`volvo_open{vin="VIN1",part="tailgate"} 0`,
+		`volvo_locked{vin="VIN1"} 0`,
+		`volvo_fast_polls_total{result="ok"} 1`,
+		`volvo_reported_timestamp_seconds{vin="VIN1",leaf="doors"} ` + formatValue(float64(reported.Unix())),
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if got := before.Connected["doors"]["tailgate"].Value; got != "OPEN" {
+		t.Errorf("fast poll changed the earlier snapshot in place: tailgate %s", got)
+	}
+
+	failDoors.Store(true)
+	p.pollFast()
+	if v := p.view(); v.fastErrors != 1 || v.snap.Connected["doors"]["tailgate"].Value != "CLOSED" {
+		t.Errorf("after a failed fast poll: errors %v, tailgate %s", v.fastErrors, v.snap.Connected["doors"]["tailgate"].Value)
+	}
+	if p.awake(time.Now()) {
+		t.Error("still fast-polling after a failed fast poll")
+	}
+	failDoors.Store(false)
+	p.poll()
+	if !p.awake(time.Now()) {
+		t.Error("a good poll did not turn fast polling back on")
 	}
 }
 
