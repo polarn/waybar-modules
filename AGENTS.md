@@ -2,17 +2,16 @@
 
 ## Project overview
 
-Personal homelab tools in Go. It began as waybar custom modules and still mostly is, but it now holds three different shapes of program. Knowing which shape you are looking at matters, because the conventions differ:
+Waybar custom modules in Go, plus the DIRIGERA CLI that shares a package with one of them. Two shapes of program, and the conventions differ:
 
 | Shape | What it does |
 |---|---|
 | **Bar module** | Long-running daemon. Polls something, prints one JSON line to stdout per tick, forever. Consumed by waybar's `custom` module type. |
-| **CLI** | One-shot. Does a thing and exits. Some carry a `waybar` subcommand that prints a single pill line — waybar runs those with `"interval"`, *not* as a daemon. |
-| **Service** | Long-running, serves HTTP, emits no waybar JSON. Currently just `bambu-exporter`, which is deployed to Kubernetes. |
+| **CLI** | One-shot. Does a thing and exits. |
 
 A subset of bar modules also support a `--swiftbar` flag for use as macOS [SwiftBar](https://swiftbar.app) plugins. In SwiftBar mode the binary is one-shot — emits a single SwiftBar-format frame on stdout and exits — because SwiftBar re-runs polled plugins on the interval encoded in the plugin's filename (e.g. `wiim.5s.sh` → every 5 seconds).
 
-The name is now narrower than the contents; see "Why it is still called waybar-modules" at the end.
+The Bambu Lab and Volvo tooling (a CLI with a `waybar` subcommand and a Prometheus exporter each) lived here until October 2026 and now have their own repos; see "What moved out" at the end.
 
 ## Repository structure
 
@@ -30,20 +29,11 @@ Bar modules (daemon, prints waybar JSON on an interval):
 
 CLIs (one-shot):
 
-- `cmd/bambu-ctl/` - Bambu Lab cloud CLI (`login`/`status`/`waybar`/`pause`/`resume`/`toggle`/`stop`/`speed`/`light`); feeds the custom/p2s printer pill
-- `cmd/volvo-ctl/` - Volvo cloud CLI (`auth`/`vehicles`/`status`/`location`/`climate`/`waybar`); feeds the custom/volvo pill. With `VOLVO_EXPORTER_URL` set, `status`/`location`/`waybar` read volvo-exporter's `/state` instead of the API
 - `cmd/tradfri-ctl/` - DIRIGERA control CLI (toggle/set lights, rotate Sonos scenes). Containerised for the flux `tradfri` CronJob.
 - `cmd/waybar-tradfri-auth/` - One-time DIRIGERA pairing; writes the token the other two read. Named `waybar-*` for historical reasons — it is a helper, not a bar module.
 
-Service:
-
-- `cmd/bambu-exporter/` - Holds one cloud MQTT subscription open; serves Prometheus metrics, a JSON state endpoint and a status page. Deployed via the flux `bambu-exporter` app.
-- `cmd/volvo-exporter/` - Polls the Volvo API every 5 min (doors, windows and engine every minute while the car is awake) as the sole holder of the refresh token; serves Prometheus metrics, `/state` for the pill, and a loopback-only login. Deployed via the flux `volvo-exporter` app.
-
 Packages:
 
-- `pkg/bambu/` - Bambu cloud client: HTTP login flow, session cache, hand-rolled minimal MQTT 3.1.1 (no client library), plus the persistent subscription and report accumulator the exporter needs
-- `pkg/volvo/` - Volvo cloud client: OAuth with PKCE + rotating refresh token, Energy/Connected Vehicle/Location APIs
 - `pkg/dirigera/` - DIRIGERA REST client: pairing, devices, scenes
 - `pkg/hwmon/` - Shared hwmon sensor discovery and reading
 - `pkg/waybar/` - Shared `Waybar` struct with JSON output and `Print()` method
@@ -59,23 +49,21 @@ Every consumer lives in chezmoi (`~/.local/share/chezmoi`). Its `CLAUDE.md` has 
 
 ## Building
 
-- `make build` - Compiles the 13 desktop binaries to `./build/`
+- `make build` - Compiles the 11 desktop binaries to `./build/`
 - `make install` - Builds, installs to `~/.local/bin/`, and kills running instances. Waybar respawns only the modules whose config sets `restart-interval`, so run `systemctl --user restart waybar` afterwards
 - `make build-swiftbar` / `make install-swiftbar` - Same flow but only for the SwiftBar-enabled subset (currently `waybar-github-pr`, `waybar-wiim-nowplaying`). Used on macOS where the Linux-only modules (hwmon temps, tradfri, etc.) wouldn't compile or be useful.
 - `make clean` - Removes `./build/`
 
-**`bambu-exporter` and `volvo-exporter` are deliberately not in `make build`.** It is a server, and `make install` copies everything in `./build/*` into `~/.local/bin` — not where a server belongs. It is built by `container-images/bambu-exporter/Dockerfile` from a pinned `SRC_REF`, so shipping a change to it means bumping that SHA and re-pinning the resulting digest in flux. Build it directly with `go build ./cmd/bambu-exporter` when working on it locally.
-
-Note `make install` does a blind `pkill -x` on every binary name it installs, so it also kills a locally-running exporter.
+Note `make install` does a blind `pkill -x` on every binary name it installs.
 
 ## Conventions
 
 Everywhere:
 
-- **No external dependencies beyond what's in `go.mod`**, which is deliberately tiny: `github.com/godbus/dbus/v5` and nothing else direct. This is a real constraint, not an aspiration — it is why the MQTT framing in `pkg/bambu` and the Prometheus exposition format in `cmd/bambu-exporter` are both hand-rolled rather than pulling in a client library. Both formats are small and stable; the libraries would each be larger than the code using them.
+- **No external dependencies beyond what's in `go.mod`**, which is deliberately tiny: `github.com/godbus/dbus/v5` and nothing else direct. This is a real constraint, not an aspiration — every HTTP API here is talked to with `net/http` and `encoding/json` by hand, and the bambu repo hand-rolls MQTT for the same reason.
 - Flags use the standard `flag` package: `--host`, `--interval`, etc.
 - Keep things simple and self-contained; avoid unnecessary abstractions.
-- One file per command is the norm and the right default. `cmd/bambu-exporter` is the only one that splits (main / metrics / task, plus an embedded `index.html`), because it is three separable concerns rather than one loop.
+- One file per command is the norm and the right default. `cmd/waybar-github-pr/runs.go` is the only split, because it owns its own cache, TTL, concurrency and notify state.
 
 Bar modules specifically:
 
@@ -85,8 +73,8 @@ Bar modules specifically:
 
 CLIs specifically:
 
-- Subcommand dispatch on `os.Args[1]` with a `flag.NewFlagSet` per subcommand; see `bambu-ctl` or `volvo-ctl`.
-- A `waybar` subcommand must **always exit 0 and print exactly one JSON line**, even on failure — a bad exit or stray output blanks or breaks the pill. Errors go to stderr (waybar forwards them to the journal) and surface as a pill `class` instead.
+- Subcommand dispatch on `os.Args[1]` with a `flag.NewFlagSet` per subcommand; see `tradfri-ctl`.
+- A CLI that feeds a pill does it through a `waybar` subcommand that **always exits 0 and prints exactly one JSON line**, even on failure — a bad exit or stray output blanks or breaks the pill. Errors go to stderr (waybar forwards them to the journal) and surface as a pill `class` instead. `bambu-ctl` and `volvo-ctl` in their own repos are the references.
 - Long-lived credentials live under `~/.config/`, mode 0600, and are never committed.
 
 ## SwiftBar plugin format
@@ -193,7 +181,7 @@ The pill also carries GitHub Actions runs needing attention: **approval** (stopp
 
 `failed` exists because the other two states are both transient, and a run that ends in `failure` would otherwise disappear from the pill exactly like a successful one — a broken production apply going quiet is the precise thing this feature is meant to prevent. It therefore sticks until acknowledged: selecting it in the picker records its ID in `dismissed-runs.json` next to the discovery cache, which the daemon reads each tick to filter it out. That file is written only by the short-lived `--open` process and read only by the daemon, so they never contend for it; entries are pruned after 7 days, long after a run drops out of the 20-entry API window. `cancelled` is deliberately not a failure — you cancelled it, so you already know.
 
-Note the running state is genuinely narrow: a gated `terraform apply` here took 47 s against a 60 s poll, so green is often missed entirely. That is expected and not worth chasing with a faster interval — the approval gate, the state that actually blocks, sits for minutes or hours and is always caught. Code lives in `runs.go` — the one split in this repo besides `bambu-exporter`, justified because it owns its own cache, TTL, concurrency and notify state, none of which the PR loop touches.
+Note the running state is genuinely narrow: a gated `terraform apply` here took 47 s against a 60 s poll, so green is often missed entirely. That is expected and not worth chasing with a faster interval — the approval gate, the state that actually blocks, sits for minutes or hours and is always caught. Code lives in `runs.go` — the one split in this repo, justified because it owns its own cache, TTL, concurrency and notify state, none of which the PR loop touches.
 
 Four dead ends, so they are not rediscovered:
 
@@ -240,80 +228,6 @@ Optional fifth state, off by default, for the listed repos, released by dispatch
 
 `--release-dry-run` prints each listed repo's verdict and reason.
 
-## bambu-ctl module details
-
-### Why cloud, not local
-
-Bambu's P2S-generation printers only serve local MQTT when LAN-only mode + Developer Mode are enabled (which kills the Handy app / MakerWorld cloud features). `bambu-ctl` therefore reads state from Bambu's cloud broker (`us.mqtt.bambulab.com:8883`) with the account's access token — the same channel Handy uses — so the printer stays in Cloud mode.
-
-### Auth flow
-
-`bambu-ctl login`: POST `/v1/user-service/user/login` on `api.bambulab.com` with OrcaSlicer-mimicking headers (Bambu's risk control rejects unknown clients). Response may demand an emailed code (`loginType: verifyCode` → `/user/sendemail/code`) or 2FA (`loginType: tfa` → `/user/tfa/login`, token in the `token` cookie). The JWT's `username` claim (`u_<uid>`) is the MQTT username; the token itself is the password. Session cached in `~/.config/bambu-cloud.json` (0600), expires ~3 months → the pill's `reauth` class.
-
-Google/Apple SSO accounts have no API-usable password and the API login rejects them entirely; `login --token` covers those by pasting the `token` cookie from a browser session on makerworld.com / bambulab.com (it's the same cloud access token). Alternative: set a password on the account via Handy/web, then normal login works.
-
-### Status fetch
-
-Subscribe `device/<serial>/report`, publish `{"pushing":{"command":"pushall"}}` to `device/<serial>/request`, take the first report containing `mc_percent` (partial pushes lack it). The printer rate-limits pushall (~1/min) — the waybar module polls at 120 s for headroom. Report fields mix numbers and numeric strings across firmwares; `pkg/bambu.Num` tolerates both.
-
-Chamber temperature moved between generations: P2S-gen firmware has no flat `print.chamber_temper` (X1-era) and reports it at `print.device.ctc.info.temp` instead. `Report.ChamberTemp()` prefers the ctc path, falls back to the flat field, and returns false when neither exists so the tooltip omits the line rather than showing a fake 0 °C — don't "simplify" either branch away. Sibling `device.*` temps pack `(target << 16) | current` (`device.bed.info.temp` 0x4b004b = 75/75), hence the low-16-bit mask; the chamber has no target today so it reads as a bare int.
-
-### Pill states
-
-`printing` (green, `% + min left`) / `paused` / `failed` / `idle` (nozzle °C) / `offline` (dim, printer off) / `setup`+`reauth` (mauve, login needed) / `error`. CSS classes live in the chezmoi waybar style.css.
-
-### Control commands
-
-`pause`/`resume`/`stop`/`speed`/`light` publish to `device/<serial>/request` (payloads per OpenBambuAPI mqtt.md: `print.command` = pause/resume/stop/print_speed with param "1"-"4"; `system.command` = ledctrl for chamber_light) and wait for the echoed `result` on the report topic — `SendCommand` in pkg/bambu matches on section+command, treats a non-"success" result as an error, and returns `ErrNoAck` on timeout (printer off). `stop` prompts for confirmation unless `--yes`. AMS drying has no documented MQTT command (start it from the touchscreen/Handy).
-
-## bambu-exporter module details
-
-### One-shot fetch vs held-open subscription
-
-`FetchReport` asks for a `pushall` per call, and the printer rate-limits those to ~1/min — that is the only reason the waybar module polls at 120 s. `Subscribe` (pkg/bambu/stream.go) holds one connection open instead and consumes the unsolicited `push_status` deltas, which arrive every 1–2 s. Anything that needs data more often than once a minute must go through `Subscribe`, not `FetchReport`.
-
-Those deltas carry only changed fields, so `State` (pkg/bambu/state.go) merges each message over the accumulated object; keeping just the newest message would make most fields absent, which renders as zero. The merge runs on decoded JSON rather than `Report` values so unmodelled fields survive — the same blind spot that hid `chamber_temper` moving to `device.ctc`. Nested objects merge key-by-key; arrays replace wholesale, because the printer resends a whole list (the AMS trays) when any of it changes.
-
-Connection details that are easy to get wrong: `dial` leaves a whole-connection deadline set for its short exchange, so a persistent session must clear it or the first keepalive write fails; CONNECT advertises a 30 s keepalive, so `Subscribe` sends PINGREQ every 20 s with a rolling read deadline (90 s of silence means the session went deaf while the socket still looks open); and the reconnect backoff resets only after a connection survives 5 minutes.
-
-### Metrics
-
-Prometheus text is hand-rolled in `cmd/bambu-exporter/metrics.go` — client_golang would pull protobuf and a half-dozen transitive modules into a repo whose `go.sum` is eight lines. Validate changes with `podman run --rm -i --entrypoint promtool docker.io/prom/prometheus:latest check metrics < metrics.txt`; it catches reserved suffixes (`_total` is counters-only — hence `bambulab_print_layers`) and non-base units (hence nozzle diameter living on `bambulab_nozzle_info` as a label rather than being named in millimetres).
-
-Naming follows `bambulab_*` with base-unit suffixes and a `printer_name` label, close to Grafana dashboard 25033 so it is a usable starting point — but not identical, see the layers note above. **A metric is emitted only when the printer reported the field**: absent must not become a confident zero. Keep the printer serial out of labels; it is credential-adjacent and would end up in dashboard screenshots.
-
-**Never name a label `job`** — or `instance`, `pod`, `namespace`, `container`, `endpoint`, `service`. The kube-prometheus-stack scrape attaches its own, and Prometheus silently renames the colliding one to `exported_<name>`. `bambulab_print_job_info` shipped with a `job` label and the dashboard's `{{job}}` rendered "bambu-exporter" instead of the print name for months. It is `title` now.
-
-Two other own-goals promtool will not always catch: two samples of one family with an *identical* label set is a scrape error, so anything derived from a repeated array (`hms`, `lights_report`) needs deduplicating; and a family whose samples carry different label *keys* is merely bad form, but an empty label value is indistinguishable from an absent label in Prometheus, so conditionally-present labels are best emitted as `""`.
-
-`bambulab_prints_total` and `bambulab_filament_grams_total` are the only counters, and the only state the exporter holds — see `jobwatch.go`. They are in-process and unpersisted on purpose: a volume would cost the container its `readOnlyRootFilesystem`, and a counter reset is something Prometheus already models. Query them with `increase()`.
-
-### Token expiry
-
-Renewal is interactive, so an unattended deployment breaks about quarterly. `bambulab_cloud_auth_ok` goes to 0 when the cloud rejects the token and the process keeps serving rather than crash-looping (a crash loop would hide the reason, and retrying in-process cannot help — the token is baked into the environment until the pod restarts). `TokenExpiry()` reads the JWT `exp` claim, but **not every token is a JWT**: the emailed-code login flow mints opaque ones, and this printer's account has one, so `bambulab_cloud_token_age_seconds` is the portable early warning.
-
-## volvo-exporter module details
-
-### One token holder
-
-Volvo rotates the refresh token on every refresh (single-use) and access tokens last 5 minutes, so every poll refreshes. Two processes holding copies of `tokens.json` will race: whichever refreshes second gets `invalid_grant` and the chain needs a browser login. The `TokenStore` flock only serialises processes that share one file. So the exporter owns the token on its PVC, the pill reads `/state`, and the Deployment uses `strategy: Recreate` so two pods never overlap. Never seed the pod from a *copy* of a live `~/.config/volvo/tokens.json`; log in through the exporter instead. A local test run is safe only with `VOLVO_DATA_DIR=~/.config/volvo` (the same file, the same lock).
-
-Shutdown waits up to 25 s for an in-flight poll rather than cancelling it: a refresh the server has accepted but the process never saved spends the token.
-
-### Login
-
-`/auth` and `/callback` listen on `127.0.0.1:20999` inside the pod, so they are reachable only through `kubectl port-forward`, which matches the hardcoded target of the `docs/volvo-callback` forwarding page. Run `kubectl -n volvo-exporter port-forward deploy/volvo-exporter 20999`, open `http://localhost:20999/auth`, and log in; the callback saves the tokens and triggers an immediate poll. `volvo_auth_ok` goes to 0 when the refresh token is rejected, and the poller keeps re-reading `tokens.json` at the normal interval. It logs the login hint once, not on every poll, and words it for `/auth` rather than the `volvo-ctl auth` that `pkg/volvo`'s errors suggest.
-
-### Polling and quota
-
-Each poll is 10 requests (energy, location, 8 Connected Vehicle leaves): 2,880/day at the 5 min default, against the app's 10,000/day and 100/min. Only the energy read is required; the other parts are best-effort and counted in `volvo_partial_errors_total`. A 429 (`RateLimitError`, including from the token endpoint, which must not be read as a lapsed grant) or other failure doubles the wait up to 1 h, or longer if `Retry-After` says so.
-
-Between full polls, while any doors, windows or engine-status field carries a car timestamp under 10 min old, the exporter re-reads those three leaves every `VOLVO_FAST_INTERVAL` (1 min) and swaps them into a copy of the snapshot. A field's `timestamp` is when the car last *reported* the leaf, shared by every field in it, not when that field changed: the car re-sends unchanged state for a few minutes after a drive and then goes quiet. So a parked, sleeping car costs nothing extra, and the worst case (always awake) is 12 more requests per 5 min, 6,336/day in total. Any fast-poll error turns fast polling off until the next good full poll, which owns the backoff. `volvo_fast_polls_total` counts them and `volvo_reported_timestamp_seconds{leaf}` exports the report times.
-
-### Metrics
-
-Same rules as bambu-exporter: hand-rolled text, base units (distances in `_meters`; promtool rejects `_kilometers`), and a metric only when the API reported the field (`chargingPower` is `PROPERTY_NOT_FOUND` when idle). Location is in `/state` for the pill but deliberately not exported to Prometheus.
-
 ## Adding a new command
 
 Pick the shape first — the steps differ, and following the bar-module path for a CLI or a service produces the wrong thing.
@@ -327,21 +241,16 @@ Pick the shape first — the steps differ, and following the bar-module path for
 5. Add the module config in chezmoi under `dot_config/waybar/modules/`, with `restart-interval` so waybar respawns it after `make install`, and place it in `config.jsonc`.
 6. Add the `go install …@latest` line to chezmoi's `run_onchange_install-waybar-modules.sh`.
 
-**A CLI** (reference: `cmd/tradfri-ctl`, or `cmd/bambu-ctl` if it needs a pill)
+**A CLI** (reference: `cmd/tradfri-ctl`, or `bambu-ctl` in `polarn/bambu` if it needs a pill)
 
 1. Create `cmd/<name>/main.go` with subcommand dispatch and a per-subcommand `FlagSet`.
 2. If it feeds a pill, add a `waybar` subcommand that prints one JSON line and always exits 0.
 3. Add the build line to `Makefile`.
 4. Add the `go install …@latest` line to chezmoi's `run_onchange_install-waybar-modules.sh`.
 
-**A service** (reference: `cmd/bambu-exporter`)
+**A service** does not go here. A new cloud domain with a CLI and an exporter gets its own repo shaped like `polarn/bambu`: `cmd/<x>-ctl`, `cmd/<x>-exporter`, `pkg/<x>`, and a copy of `pkg/waybar` for the pill subcommand.
 
-1. Create `cmd/<name>/`, splitting files by concern; config from the environment so it suits a Kubernetes `envFrom: secretRef`.
-2. Take a `context` cancelled on SIGINT/SIGTERM and shut the listeners down on it.
-3. Keep `/metrics` on a separate port from anything user-facing, so the ingress can expose one and not the other.
-4. Leave it **out** of the `Makefile` (see Building), add a `Dockerfile` under `polarn/container-images` pinning `SRC_REF`, then a flux app under `apps/microk8s/`.
-
-Whichever shape: a metric or a field is emitted only when the upstream actually reported it. Publishing a zero for an absent value is how `chamber_temper` silently graphed 0 °C for months.
+Whichever shape: a field is emitted only when the upstream actually reported it. Publishing a zero for an absent value is how the bambu exporter silently graphed a 0 °C chamber for months.
 
 ### Adding SwiftBar support to an existing module
 
@@ -351,12 +260,12 @@ Whichever shape: a metric or a field is emitted only when the upstream actually 
 4. Add the binary name to `SWIFTBAR_BINS` in the Makefile so `make install-swiftbar` picks it up.
 5. Add a corresponding plugin script under `~/.config/swiftbar/plugins/<name>.<interval>.sh` (tracked in chezmoi under the `darwin` guard) that just `exec`s the binary with `--swiftbar` and any host-specific flags.
 
-## Why it is still called waybar-modules
+## What moved out
 
-The name undersells the contents — roughly 57% of the Go here is not a bar module — so this comes up. It was considered and declined in August 2026; the reasoning, so it need not be rediscovered:
+In October 2026 the Bambu Lab and Volvo domains were split into `polarn/bambu` (`bambu-ctl`, `bambu-exporter`, `pkg/bambu`) and `polarn/volvo` (`volvo-ctl`, `volvo-exporter`, `pkg/volvo`), each with its history filtered out of this one. The cut is per domain, not "waybar vs not": a CLI and its exporter share the client package, so they travel together. tradfri stayed because two of its three commands are bar modules and the whole domain is 1.3k lines.
 
-**Splitting on "waybar vs not" is the wrong cut.** It runs straight through three shared packages: `pkg/bambu` (used by both `bambu-ctl`'s pill and `bambu-exporter`), `pkg/dirigera` (used by `tradfri-ctl` *and* `waybar-tradfri`/`waybar-tradfri-auth`), and `pkg/waybar` itself (linked by `volvo-ctl` and `bambu-ctl` for their `waybar` subcommands). The natural seam is per-domain — bambu, volvo, tradfri, bar modules — where each domain owns its package outright. If this is ever revisited, split that way, and take `bambu` first: it is the largest and most active area, is already a deployed service with its own image and flux app, and is already outside `make build`.
+Each of those repos carries its own copy of `pkg/waybar` (30 lines) rather than importing this module: a cross-module dependency on `@latest` would multiply the stale-proxy footgun documented in chezmoi's CLAUDE.md.
 
-**Renaming the repo is the risky operation, not extracting from it.** `https://polarn.github.io/waybar-modules/volvo-callback/` is served from `docs/volvo-callback/` here and is the registered OAuth redirect URI of a published Volvo app whose settings are fixed at publication. Changing the repo name, or moving that directory elsewhere, breaks `volvo-ctl auth` until a new Volvo app is published. Extracting a *different* domain into a new repo leaves it untouched.
+**`docs/volvo-callback/` stays here even though the Volvo code left.** `https://polarn.github.io/waybar-modules/volvo-callback/` is the registered OAuth redirect URI of a published Volvo app, fixed at publication, and GitHub Pages does not redirect after a repo rename. Renaming this repo, or moving that directory, breaks `volvo-ctl auth` and the exporter's login until a new Volvo app is published.
 
-Nothing outside imports this module as a library and it has never been tagged — consumers use `@latest` (chezmoi) or raw commit SHAs (`SRC_REF` in container-images). So a split would not break Go dependency resolution, but it would multiply the stale-proxy footgun already documented in chezmoi's CLAUDE.md across N repos.
+Nothing imports this module as a library and it has never been tagged — chezmoi uses `@latest` and `polarn/container-images` pins raw commit SHAs (`SRC_REF`). Dockerfiles that still pin a pre-split SHA of this repo keep building, since the history is intact.
