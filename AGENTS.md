@@ -45,7 +45,7 @@ Every consumer lives in chezmoi (`~/.local/share/chezmoi`). Its `CLAUDE.md` has 
 
 - `dot_config/waybar/modules/<name>.jsonc`: each pill's `exec` line, flags, clicks and `restart-interval`. `config.jsonc` places it on a bar.
 - `dot_config/waybar/style.css`: colours keyed `#custom-<name>.<class>`, so a new `class` needs a rule there.
-- `run_onchange_install-waybar-modules.sh`: the `go install …@latest` list. For macOS, `run_onchange_install-swiftbar-modules.sh` and `dot_config/swiftbar/plugins/`.
+- `run_onchange_install-waybar-modules.sh`: the `go install …@latest` list, which also installs `bambu-ctl` and `volvo-ctl` from their own repos. For macOS, `run_onchange_install-swiftbar-modules.sh` and `dot_config/swiftbar/plugins/`.
 - `dot_config/systemd/user/waybar-inhibitors.service`: `waybar-inhibitors` runs as a user unit, and the pill reads its output file.
 
 ## Building
@@ -261,12 +261,22 @@ Whichever shape: a field is emitted only when the upstream actually reported it.
 4. Add the binary name to `SWIFTBAR_BINS` in the Makefile so `make install-swiftbar` picks it up.
 5. Add a corresponding plugin script under `~/.config/swiftbar/plugins/<name>.<interval>.sh` (tracked in chezmoi under the `darwin` guard) that just `exec`s the binary with `--swiftbar` and any host-specific flags.
 
-## What moved out
+## What moved out, and how
 
-In October 2026 the Bambu Lab and Volvo domains were split into `polarn/bambu` (`bambu-ctl`, `bambu-exporter`, `pkg/bambu`) and `polarn/volvo` (`volvo-ctl`, `volvo-exporter`, `pkg/volvo`), each with its history filtered out of this one. The cut is per domain, not "waybar vs not": a CLI and its exporter share the client package, so they travel together. tradfri stayed because two of its three commands are bar modules and the whole domain is 1.3k lines.
+On 2026-10-31 the Bambu Lab and Volvo domains were split into `polarn/bambu` (`bambu-ctl`, `bambu-exporter`, `pkg/bambu`) and `polarn/volvo` (`volvo-ctl`, `volvo-exporter`, `pkg/volvo`), each with its history filtered out of this one. The cut is per domain, not "waybar vs not": a CLI and its exporter share the client package, so they travel together. tradfri stayed because two of its three commands are bar modules and the whole domain is 1.3k lines.
 
-Each of those repos carries its own copy of `pkg/waybar` (30 lines) rather than importing this module: a cross-module dependency on `@latest` would multiply the stale-proxy footgun documented in chezmoi's CLAUDE.md.
+How, for the next domain that outgrows this repo:
+
+- `git clone --no-local` a fresh copy, then `git filter-repo --path cmd/<x>-ctl --path cmd/<x>-exporter --path pkg/<x> --path pkg/waybar --path LICENSE`. It refuses a clone that is not fresh and removes `origin`; add the new remote afterwards. Rewrite the module path in `go.mod` and every import, and pin `go.mod` to the same `go` line and dependency versions as here: a bare `go mod tidy` takes the newest of everything, including a `go` line ahead of the `golang:1.25` the Dockerfiles build with.
+- Each repo carries its own copy of `pkg/waybar` (30 lines) rather than importing this module: a cross-module dependency on `@latest` would multiply the stale-proxy footgun documented in chezmoi's CLAUDE.md.
+- The new repos are public. chezmoi installs with a plain `go install …@latest` through proxy.golang.org, which cannot read private repos, and every commit was already public here, so private would have cost `GOPRIVATE` plus git credentials on every host and a cross-repo token in the image build, for nothing.
+- Their exporter images are built in those repos (root `Dockerfile`, `.github/workflows/build.yml` with `paths:` filters, which GitHub evaluates over the whole push), not in `polarn/container-images`; flux is repinned from the digest in the run summary. A ghcr package created by one repo refuses another repo's `GITHUB_TOKEN` (`denied: permission_denied: write_package`) until the package's *Manage Actions access* grants it, which has no API. The package stays linked to the repo that created it; that is cosmetic and cannot be changed.
+- `tradfri-ctl` is the one image still built from this repo, by `polarn/container-images` cloning a pinned `SRC_REF`: this repo has no image workflow and that CLI changes about once a year. If that stops being true, copy the workflow shape from `polarn/bambu`.
 
 **`docs/volvo-callback/` stays here even though the Volvo code left.** `https://polarn.github.io/waybar-modules/volvo-callback/` is the registered OAuth redirect URI of a published Volvo app, fixed at publication, and GitHub Pages does not redirect after a repo rename. Renaming this repo, or moving that directory, breaks `volvo-ctl auth` and the exporter's login until a new Volvo app is published.
 
-Nothing imports this module as a library and it has never been tagged — chezmoi uses `@latest` and `polarn/container-images` pins raw commit SHAs (`SRC_REF`). Dockerfiles that still pin a pre-split SHA of this repo keep building, since the history is intact.
+Nothing imports this module as a library and it has never been tagged — chezmoi uses `@latest` and `polarn/container-images` pins a raw commit SHA for `tradfri-ctl`.
+
+## Repo settings
+
+`polarn` repos are squash-merge only with delete-branch-on-merge, and the public ones carry a `linear-history` ruleset on `main` (`required_linear_history` plus `non_fast_forward`, no bypass actors); GitHub Free refuses rulesets on private repos, so there the merge button is the only guard. A squash leaves the branch tip unreachable from `main`, so `git branch --merged` never lists a merged branch: delete it with `-D` once the PR is in.
