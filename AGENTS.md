@@ -26,6 +26,7 @@ Bar modules (daemon, prints waybar JSON on an interval):
 - `cmd/waybar-inhibitors/` - How many clients hold a screensaver idle-inhibitor, and which
 - `cmd/waybar-allsvenskan/` - Allsvenskan fixtures and live scores for a configured team
 - `cmd/waybar-batteries/` - Aggregated battery level across Bluetooth (UPower) and SteelSeries (headsetcontrol) peripherals
+- `cmd/waybar-camera/` - Whether a webcam is in use, and by whom: direct `/dev/video*` holders plus the clients linked to the camera's PipeWire node. Event-driven (inotify on the device nodes), not polled; Linux-only (`//go:build linux`)
 
 CLIs (one-shot):
 
@@ -49,7 +50,7 @@ Every consumer lives in chezmoi (`~/.local/share/chezmoi`). Its `CLAUDE.md` has 
 
 ## Building
 
-- `make build` - Compiles the 11 desktop binaries to `./build/`
+- `make build` - Compiles the 12 desktop binaries to `./build/`
 - `make install` - Builds, installs to `~/.local/bin/`, and kills running instances. Waybar respawns only the modules whose config sets `restart-interval`, so run `systemctl --user restart waybar` afterwards
 - `make build-swiftbar` / `make install-swiftbar` - Same flow but only for the SwiftBar-enabled subset (currently `waybar-github-pr`, `waybar-wiim-nowplaying`). Used on macOS where the Linux-only modules (hwmon temps, tradfri, etc.) wouldn't compile or be useful.
 - `make clean` - Removes `./build/`

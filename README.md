@@ -3,7 +3,7 @@ Waybar modules written in GO, started to learn some GO. See [AGENTS.md](AGENTS.m
 
 Two kinds of thing live here:
 
-- **Bar modules** — daemons that print one JSON line per tick for Waybar's `custom` module type: `waybar-gitlab-mr`, `waybar-github-pr`, `waybar-wiim-nowplaying`, `waybar-cpu-temp`, `waybar-gpu-temp`, `waybar-tradfri`, `waybar-inhibitors`, `waybar-allsvenskan`, `waybar-batteries`
+- **Bar modules** — daemons that print one JSON line per tick for Waybar's `custom` module type: `waybar-gitlab-mr`, `waybar-github-pr`, `waybar-wiim-nowplaying`, `waybar-cpu-temp`, `waybar-gpu-temp`, `waybar-tradfri`, `waybar-inhibitors`, `waybar-allsvenskan`, `waybar-batteries`, `waybar-camera`
 - **CLIs** — one-shot tools: `tradfri-ctl`, `waybar-tradfri-auth`
 
 `make` builds everything; binaries land in the `build` folder. `make install` copies them to `~/.local/bin`.
@@ -123,4 +123,7 @@ Allsvenskan fixtures and live scores, via FotMob's unofficial JSON endpoint. The
 
 ## waybar-batteries
 One pill for every battery-equipped peripheral it can reach: Bluetooth devices via `upower`, and SteelSeries USB-dongle headsets via `headsetcontrol`. Up to `--max-inline` devices (default 2) are all shown inline, sorted by charge ascending; beyond that it shows just the lowest one plus a `+N`, with the rest in the tooltip. Adding a new source means writing one poll function that returns `[]Device`.
+
+## waybar-camera
+Whether a webcam is in use. The pill is a webcam glyph with class `idle` or `active`, or a crossed-out one with class `absent` when no `/dev/video*` exists; the tooltip names each device and who holds it. Apps that open the device directly (Chrome's default) show by process name and pid. When the holder is PipeWire, it reads `pw-dump` instead and names the clients linked to the camera's node, so a portal or PipeWire-camera browser shows as e.g. `Firefox (firefox, pid 4211)`, and a node PipeWire keeps open while idle doesn't count. It watches the device nodes with inotify and rescans `/proc` only after an open or close (`--settle`, default 250ms, so enumeration blips don't flash the pill); `pw-dump` is re-read every `--poll` (2s) only while PipeWire holds a camera. `--once` prints the current state and exits.
 
