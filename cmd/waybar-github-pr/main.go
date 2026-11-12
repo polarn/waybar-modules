@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -109,6 +110,21 @@ func main() {
 	var scopeName string
 	var workOwnersCSV string
 	var hideEmpty bool
+	var swiftbarFont string
+	var swiftbarWidth int
+	var openRunID int64
+	var dispatchApplyRoots string
+	var dispatchReleaseSpec string
+	flag.StringVar(&swiftbarFont, "swiftbar-font", "JetBrainsMono Nerd Font",
+		"With --swiftbar, the font of the title and rows; it must carry the Nerd Font glyphs")
+	flag.IntVar(&swiftbarWidth, "swiftbar-width", 100,
+		"With --swiftbar, the width of a dropdown row's text in characters")
+	flag.Int64Var(&openRunID, "open-run", 0,
+		"Open the cached workflow run with this ID, dismissing it if it failed, and exit")
+	flag.StringVar(&dispatchApplyRoots, "dispatch-apply", "",
+		"Dispatch the apply of these comma-separated cached pending roots and exit")
+	flag.StringVar(&dispatchReleaseSpec, "dispatch-release", "",
+		"Dispatch the cached pending release named owner/repo@version and exit")
 	flag.IntVar(&interval, "interval", 120, "Interval of polling in seconds")
 	flag.StringVar(&scopeName, "scope", "",
 		"work or personal: keep only repos owned by --work-owners, or only the rest (empty keeps everything). Also names the --open cache")
@@ -120,7 +136,7 @@ func main() {
 	flag.StringVar(&hideTitles, "hide-titles", "",
 		"With --open, leave out PRs (and their notifications) whose title matches this regexp")
 	flag.BoolVar(&notify, "notify", true, "Fire notify-send for new GitHub notifications")
-	flag.BoolVar(&swiftbar, "swiftbar", false, "Emit SwiftBar streamable format instead of waybar JSON (implies --notify=false)")
+	flag.BoolVar(&swiftbar, "swiftbar", false, "Poll once, print a SwiftBar title and dropdown instead of waybar JSON, and exit (implies --notify=false)")
 	flag.StringVar(&notifyReasonsCSV, "notify-reasons",
 		"mention,team_mention,review_requested,assign,comment,author",
 		"Comma-separated reasons that should produce notify-send + count toward the pill")
@@ -182,6 +198,18 @@ func main() {
 			hide = re
 		}
 		openPRs(sc.name, hide)
+		return
+	}
+
+	switch {
+	case openRunID != 0:
+		openRun(sc.name, openRunID)
+		return
+	case dispatchApplyRoots != "":
+		dispatchCachedApplies(sc.name, dispatchApplyRoots)
+		return
+	case dispatchReleaseSpec != "":
+		dispatchCachedRelease(sc.name, dispatchReleaseSpec)
 		return
 	}
 
@@ -275,6 +303,7 @@ func main() {
 
 	if swiftbar {
 		notify = false
+		loadSubjectDone()
 	}
 
 	notifyReasons := map[string]bool{}
@@ -296,6 +325,10 @@ func main() {
 		approved, err := fetchPRs("approved")
 		if err != nil {
 			log.Printf("Error fetching approved PRs: %s", err)
+			if swiftbar {
+				printSwiftBarError(os.Stdout, swiftbarFont, err)
+				return
+			}
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
@@ -303,13 +336,17 @@ func main() {
 		all, err := fetchPRs("")
 		if err != nil {
 			log.Printf("Error fetching all PRs: %s", err)
+			if swiftbar {
+				printSwiftBarError(os.Stdout, swiftbarFont, err)
+				return
+			}
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
 		approved, all = keepPRs(approved, sc), keepPRs(all, sc)
 
 		var releases []PendingRelease
-		if len(releaseRepos) > 0 && !swiftbar {
+		if len(releaseRepos) > 0 {
 			releases = fetchReleases(releaseRepos, releaseWorkflow)
 			notifyReleases(releases, notify)
 		}
@@ -322,7 +359,7 @@ func main() {
 		// segment by the same path a failed poll does.
 		var runs runsResult
 		var approvalRuns, runningRuns, failedRuns []Run
-		if runsEnabled && !swiftbar {
+		if runsEnabled {
 			repos, login := watchedRepos(slices.Concat(watchRuns, releaseRepos), runsTTL)
 			runs = fetchRuns(keepRepos(repos, sc), login, failedTTL)
 			approvalRuns, runningRuns, failedRuns = splitRuns(runs.Runs)
@@ -333,7 +370,7 @@ func main() {
 		// the runs poll above: a failure here must not disturb either the PR
 		// counts or the run states.
 		var pending []PendingRoot
-		if applyRepo != "" && !swiftbar {
+		if applyRepo != "" {
 			p, err := fetchPending(applyRepo, applyWorkflow, applyWindow, applyIncludeUnapplied)
 			if err != nil {
 				log.Printf("Error tracking unapplied roots: %s", err)
@@ -348,7 +385,7 @@ func main() {
 		// disturb the PR counts.
 		var queue prFacts
 		var inQueue, refused int
-		if queueEnabled && !swiftbar {
+		if queueEnabled {
 			queue = fetchPRFacts()
 			annotatePRs(all, queue)
 			inQueue, refused = splitQueue(all)
@@ -356,13 +393,16 @@ func main() {
 		}
 
 		var reviews reviewsResult
-		if reviewsEnabled && !swiftbar {
+		if reviewsEnabled {
 			reviews = fetchReviews(sc)
 		}
 
 		// Pull notifications, fire notify-send for any new ones, and feed the
 		// filtered count into the pill / tooltip / left-click menu.
 		notifs := processNotifications(notifyReasons, quietReviewRepos, notify, sc, reviews)
+		if swiftbar {
+			saveSubjectDone()
+		}
 		reasons, loose := foldNotifications(all, reviews.Requests, notifs)
 
 		var tooltips, draftTips []string
@@ -397,14 +437,11 @@ func main() {
 			status = "found"
 		}
 
-		if !swiftbar {
-			writePRCache(sc.name, all, approved, reviews.Requests, notifs, runs.Runs, pending, releases)
+		cache := PRCache{
+			All: all, Approved: approved, Reviews: reviews.Requests, Notifications: notifs, Runs: runs.Runs,
+			Pending: pending, Releases: releases,
 		}
-
-		if swiftbar {
-			printSwiftBarGitHub(approved, all, notifs)
-			return
-		}
+		writePRCache(sc.name, cache)
 
 		text := fmt.Sprintf("%d·%d", len(approved), len(all))
 		if queue.Complete {
@@ -444,6 +481,21 @@ func main() {
 		}
 		if n := len(releases); n > 0 {
 			text += fmt.Sprintf(" %s %d", glyphRelease, n)
+		}
+
+		if swiftbar {
+			var needApproval, failed int
+			if runs.Complete {
+				needApproval, failed = len(approvalRuns), len(failedRuns)
+			}
+			printSwiftBar(os.Stdout, swiftBarMenu{
+				title:    swiftBarTitle(len(approved), len(all), len(people), needApproval, failed),
+				sections: pickerSections(cache, swiftbarWidth),
+				font:     swiftbarFont,
+				self:     swiftBarSelf(),
+				scope:    sc.name,
+			})
+			return
 		}
 
 		for _, g := range []struct {
@@ -562,19 +614,6 @@ func main() {
 	}
 }
 
-// printSwiftBarGitHub emits one SwiftBar plugin frame and exits. SwiftBar
-// runs the script on its filename interval (e.g. github-pr.5m.sh → every 5
-// minutes), so this is invoked fresh each tick — no loop, no separator.
-func printSwiftBarGitHub(approved, all []PR, notifs []Notification) {
-	title := fmt.Sprintf("%d·%d :arrow.triangle.pull:", len(approved), len(all))
-	if len(notifs) > 0 {
-		title = fmt.Sprintf("%d·%d :bell.badge: %d", len(approved), len(all), len(notifs))
-	}
-	fmt.Println(title)
-	fmt.Println("---")
-	fmt.Println("Open PRs | href=https://github.com/pulls")
-}
-
 // fetchNotifications reads the user's unread GitHub notifications via the
 // already-authenticated gh CLI. Returns the raw list — caller filters.
 func fetchNotifications() ([]Notification, error) {
@@ -684,6 +723,10 @@ func subjectIsDone(n Notification) bool {
 	}
 	key := n.Subject.URL + "@" + n.UpdatedAt
 	if done, ok := subjectDone[key]; ok {
+		return done
+	}
+	if done, ok := subjectDoneSaved[key]; ok {
+		subjectDone[key] = done
 		return done
 	}
 	out, err := exec.Command("gh", "api", n.Subject.URL, "--jq", ".state").Output()
@@ -824,11 +867,18 @@ type PRCache struct {
 	Releases      []PendingRelease `json:"releases,omitempty"`
 }
 
-func writePRCache(scope string, all, approved []PR, reviews []ReviewRequest, notifs []Notification, runs []Run, pending []PendingRoot, releases []PendingRelease) {
-	data, err := json.Marshal(PRCache{
-		All: all, Approved: approved, Reviews: reviews, Notifications: notifs, Runs: runs, Pending: pending,
-		Releases: releases,
-	})
+func readPRCache(scope string) (PRCache, error) {
+	var cache PRCache
+	data, err := os.ReadFile(cacheFilePath(scope))
+	if err != nil {
+		return cache, err
+	}
+	err = json.Unmarshal(data, &cache)
+	return cache, err
+}
+
+func writePRCache(scope string, cache PRCache) {
+	data, err := json.Marshal(cache)
 	if err != nil {
 		log.Printf("Error marshaling PR cache: %s", err)
 		return
@@ -866,6 +916,9 @@ const glyphDraft = "◌"
 
 type item struct {
 	label string
+	glyph string
+	when  time.Time
+	text  string
 	url   string
 	// Non-zero for a failed run: opening it is also how you acknowledge
 	// it, which is what stops the daemon resurfacing it next tick.
@@ -889,6 +942,7 @@ type section struct {
 	title    string
 	items    []item
 	labelled bool
+	bulk     bool
 }
 
 // row lays an entry out as glyph, a right-aligned age column, then the text.
@@ -897,6 +951,10 @@ type section struct {
 // lose exactly the context the column exists to add.
 func row(glyph string, when time.Time, text string) string {
 	return fmt.Sprintf("%s %4s  %s", glyph, humanAge(when), text)
+}
+
+func newItem(glyph string, when time.Time, text string) item {
+	return item{label: row(glyph, when, text), glyph: glyph, when: when, text: text}
 }
 
 // rowTextWidth is what a row has left for its text once row() has spent the
@@ -911,8 +969,8 @@ const rowTextWidth = pickerWidth - 8
 // environment — and the middle is a title, so the title is what gives way.
 // Letting fuzzel ellipsize the right-hand end instead would drop precisely
 // the part that makes the row worth reading.
-func fitText(head, middle, suffix string) string {
-	room := rowTextWidth - len([]rune(head)) - len([]rune(suffix))
+func fitText(width int, head, middle, suffix string) string {
+	room := width - len([]rune(head)) - len([]rune(suffix))
 	if room < 12 {
 		room = 12 // a suffix long enough to squeeze the title out entirely
 	}
@@ -939,15 +997,9 @@ func divider(title string) string {
 // unread notifications, workflow runs and roots pending apply. Selecting an
 // entry opens the relevant URL in the default browser.
 func openPRs(scope string, hide *regexp.Regexp) {
-	data, err := os.ReadFile(cacheFilePath(scope))
+	cache, err := readPRCache(scope)
 	if err != nil {
 		log.Printf("No cached items: %s", err)
-		return
-	}
-
-	var cache PRCache
-	if err := json.Unmarshal(data, &cache); err != nil {
-		log.Printf("Error reading cache: %s", err)
 		return
 	}
 
@@ -1031,6 +1083,19 @@ func withoutTitles(cache PRCache, hide *regexp.Regexp) (PRCache, int) {
 // Renovate PRs awaiting review, workflow runs, roots pending apply, unreleased repos, then notifications,
 // each group after the first introduced by a divider.
 func pickerItems(cache PRCache) []item {
+	var items []item
+	for i, s := range pickerSections(cache, rowTextWidth) {
+		// No divider above the first group, since it separates nothing,
+		// except for drafts, whose ✓ and ◌ would otherwise pass for ready PRs.
+		if i > 0 || s.labelled {
+			items = append(items, item{label: divider(s.title), divider: true})
+		}
+		items = append(items, s.items...)
+	}
+	return items
+}
+
+func pickerSections(cache PRCache, width int) []section {
 	// Resolved before the PR rows are built rather than patched onto them
 	// afterwards, so a reason is part of the suffix each row is sized around
 	// instead of a tail hung past the window's edge.
@@ -1051,11 +1116,8 @@ func pickerItems(cache PRCache) []item {
 			suffix = " · " + pr.Queue.Summary()
 		}
 		suffix += commentsSuffix(pr.Comments) + reasons[pr.URL]
-		it := item{
-			label: row(prefix, parseGHTime(pr.CreatedAt),
-				fitText(prHead(pr), pr.Title, suffix)),
-			url: pr.URL,
-		}
+		it := newItem(prefix, parseGHTime(pr.CreatedAt), fitText(width, prHead(pr), pr.Title, suffix))
+		it.url = pr.URL
 		if pr.IsDraft {
 			drafts.items = append(drafts.items, it)
 		} else {
@@ -1064,15 +1126,13 @@ func pickerItems(cache PRCache) []item {
 	}
 
 	reviewItem := func(r ReviewRequest, head, middle string) item {
-		return item{
-			label: row(r.Glyph(), parseGHTime(r.UpdatedAt),
-				fitText(head, middle, r.Suffix()+reasons[r.URL])),
-			url: r.URL,
-		}
+		it := newItem(r.Glyph(), parseGHTime(r.UpdatedAt), fitText(width, head, middle, r.Suffix()+reasons[r.URL]))
+		it.url = r.URL
+		return it
 	}
 	reviews := section{title: "Review requested"}
-	deps := section{title: "Dependabot"}
-	renovate := section{title: "Renovate"}
+	deps := section{title: "Dependabot", bulk: true}
+	renovate := section{title: "Renovate", bulk: true}
 	var people []ReviewRequest
 	for _, r := range cache.Reviews {
 		switch {
@@ -1090,7 +1150,7 @@ func pickerItems(cache PRCache) []item {
 	}
 	var grouped []section
 	for _, g := range groups {
-		s := section{title: g.title, labelled: true}
+		s := section{title: g.title, labelled: true, bulk: true}
 		for _, r := range g.reqs {
 			head, middle := g.row(r)
 			s.items = append(s.items, reviewItem(r, head, middle))
@@ -1117,51 +1177,40 @@ func pickerItems(cache PRCache) []item {
 			suffix = " · " + r.Conclusion
 			dismiss = r.ID
 		}
-		runs.items = append(runs.items, item{
-			label: row(prefix, r.When(), fitText(fmt.Sprintf("[%s] ", r.Repo),
-				r.Title(), suffix+fmt.Sprintf(" #%d", r.ID))),
-			url:     r.HTMLURL,
-			dismiss: dismiss,
-		})
+		it := newItem(prefix, r.When(), fitText(width, fmt.Sprintf("[%s] ", r.Repo),
+			r.Title(), suffix+fmt.Sprintf(" #%d", r.ID)))
+		it.url, it.dismiss = r.HTMLURL, dismiss
+		runs.items = append(runs.items, it)
 	}
 
-	applies := section{title: "Needs terraform apply"}
+	applies := section{title: "Needs terraform apply", bulk: true}
 	for _, p := range cache.Pending {
-		applies.items = append(applies.items, item{
-			label: row(glyphApply, parseGHTime(p.NewestWhen),
-				fitText(fmt.Sprintf("[%s] ", p.Repo), p.Root,
-					fmt.Sprintf(" · needs apply (%d commit(s))", p.Commits))),
-			url:      p.CompareURL,
-			dispatch: []PendingRoot{p},
-		})
+		it := newItem(glyphApply, parseGHTime(p.NewestWhen), fitText(width, fmt.Sprintf("[%s] ", p.Repo), p.Root,
+			fmt.Sprintf(" · needs apply (%d commit(s))", p.Commits)))
+		it.url, it.dispatch = p.CompareURL, []PendingRoot{p}
+		applies.items = append(applies.items, it)
 	}
 	if n := len(cache.Pending); n > 1 {
-		applies.items = append(applies.items, item{
-			label: row(glyphApply, time.Time{},
-				fmt.Sprintf("[%s] all %d roots · dispatch every apply", cache.Pending[0].Repo, n)),
-			dispatch: cache.Pending,
-		})
+		it := newItem(glyphApply, time.Time{},
+			fmt.Sprintf("[%s] all %d roots · dispatch every apply", cache.Pending[0].Repo, n))
+		it.dispatch = cache.Pending
+		applies.items = append(applies.items, it)
 	}
 
-	releases := section{title: "Unreleased"}
+	releases := section{title: "Unreleased", bulk: true}
 	for _, p := range cache.Releases {
-		releases.items = append(releases.items, item{
-			label: row(glyphRelease, parseGHTime(p.NewestWhen),
-				fitText(fmt.Sprintf("[%s] ", p.Repo), fmt.Sprintf("%d commit(s) since %s", p.Commits, p.LastTag),
-					" · release "+p.Next())),
-			url:     p.CompareURL,
-			release: &p,
-		})
+		it := newItem(glyphRelease, parseGHTime(p.NewestWhen), fitText(width, fmt.Sprintf("[%s] ", p.Repo),
+			fmt.Sprintf("%d commit(s) since %s", p.Commits, p.LastTag), " · release "+p.Next()))
+		it.url, it.release = p.CompareURL, &p
+		releases.items = append(releases.items, it)
 	}
 
-	notifs := section{title: "Notifications"}
+	notifs := section{title: "Notifications", bulk: true}
 	for _, n := range loose {
-		notifs.items = append(notifs.items, item{
-			label: row("󰂜", parseGHTime(n.UpdatedAt),
-				fitText(fmt.Sprintf("[%s] [%s] ", n.Reason, n.Repository.FullName),
-					n.Subject.Title, "")),
-			url: subjectWebURL(n),
-		})
+		it := newItem("󰂜", parseGHTime(n.UpdatedAt), fitText(width,
+			fmt.Sprintf("[%s] [%s] ", n.Reason, n.Repository.FullName), n.Subject.Title, ""))
+		it.url = subjectWebURL(n)
+		notifs.items = append(notifs.items, it)
 	}
 
 	var populated []section
@@ -1173,16 +1222,7 @@ func pickerItems(cache PRCache) []item {
 		}
 	}
 
-	var items []item
-	for i, s := range populated {
-		// No divider above the first group, since it separates nothing,
-		// except for drafts, whose ✓ and ◌ would otherwise pass for ready PRs.
-		if i > 0 || s.labelled {
-			items = append(items, item{label: divider(s.title), divider: true})
-		}
-		items = append(items, s.items...)
-	}
-	return items
+	return populated
 }
 
 // prHead names the PR a row belongs to. The number is what makes two rows
@@ -1256,7 +1296,15 @@ func openItem(url string, dismiss int64) {
 	if dismiss != 0 {
 		dismissRun(dismiss)
 	}
-	exec.Command("xdg-open", url).Start()
+	openURL(url)
+}
+
+func openURL(url string) {
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	exec.Command(opener, url).Start()
 }
 
 // parseGHTime parses one of the RFC3339 timestamps GitHub returns, yielding
