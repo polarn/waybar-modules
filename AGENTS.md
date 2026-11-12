@@ -18,7 +18,7 @@ The Bambu Lab and Volvo tooling (a CLI with a `waybar` subcommand and a Promethe
 Bar modules (daemon, prints waybar JSON on an interval):
 
 - `cmd/waybar-gitlab-mr/` - Count of GitLab merge requests awaiting review
-- `cmd/waybar-github-pr/` - Your open PRs (approved·total), PRs awaiting your or your team's review, GitHub notifications, workflow runs, merge-queue state, terraform roots pending apply and repos with unreleased changes, with a fuzzel picker on click. Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
+- `cmd/waybar-github-pr/` - Your open PRs (approved·total), PRs awaiting your or your team's review, GitHub notifications, workflow runs, merge-queue state, terraform roots pending apply and repos with unreleased changes, with a fuzzel picker on click (a dropdown under SwiftBar). Runs as a work and a personal pill (`--scope`). SwiftBar-enabled.
 - `cmd/waybar-wiim-nowplaying/` - Now-playing info from a WiiM device (amp/mini/pro), with volume control. SwiftBar-enabled.
 - `cmd/waybar-cpu-temp/` - CPU temperature, tooltip lists every CPU hwmon sensor
 - `cmd/waybar-gpu-temp/` - GPU temperature; picks the card with the most sensors (the discrete one), tooltip lists loaded llama-swap models
@@ -83,6 +83,12 @@ CLIs specifically:
 SwiftBar plugins emit plain text on stdout: the first line is the menu bar title, then `---` introduces the dropdown. Inline SF Symbols use the `:symbol.name:` syntax (e.g. `:music.note:`, `:arrow.triangle.pull:`). Dropdown rows can have `| href=URL` to open a link, or `| shell=/path param1=… param2=…` to invoke a command — modules use the latter to wire menu actions back to themselves (e.g. WiiM Volume Up/Down re-invokes the binary with `--volume-up` via `os.Executable()` so the path is always self-consistent).
 
 Plugin filename intervals (`5s`, `5m`, etc.) are interpreted by SwiftBar — the binary itself doesn't know or care about the interval in `--swiftbar` mode.
+
+Three things SwiftBar's parser (`MenuLineParameters.swift`) does that a module must allow for:
+
+- **A line splits at its first `|`**, and everything after it is parsed as parameters. Text from outside (a PR title, a track name) must have `|` and newlines replaced before it is printed, or it can cut the row short and add its own `shell=`. `waybar-github-pr` does this in `swiftBarText`, and refuses any parameter value holding a quote, backslash, `|` or newline (`swiftBarValue`).
+- **`shell=` runs in a Terminal window unless the row says `terminal=false`.**
+- **A click action that names the binary bypasses the plugin script**, and with it the `PATH` the script sets, which is where `gh` comes from. Point `shell=` at `$SWIFTBAR_PLUGIN_PATH` (the plugin script, which passes `"$@"` on to the binary) instead.
 
 Streamable plugins (`<swiftbar.type>streamable</swiftbar.type>`) were tried first but cause NSStatusItem visibility issues: the menu bar item gets created with empty content during the leading-separator `~~~` priming step, and macOS persists `VisibleCC=0` for it. Polled mode (the current approach) sidesteps that entirely.
 
@@ -174,7 +180,19 @@ One binary runs as two pills: `--scope=work` keeps repos whose owner is in `--wo
 
 ### SwiftBar mode
 
-`--swiftbar` implies `--notify=false` (no `notify-send` on macOS) and skips the `$XDG_RUNTIME_DIR` cache write (the `--open` flow isn't used). Title is `approved·total :arrow.triangle.pull:`, with a `:bell.badge:` variant when there are unread notifications. Dropdown is a single `Open PRs | href=https://github.com/pulls` row — no per-PR list (intentionally simple; can be extended later by adding a list subcommand).
+`--swiftbar` runs one full poll with the same flags as the waybar pill, prints a title and a dropdown, and exits. It implies `--notify=false`: a one-shot process has no baseline to tell a new notification from an old one. The title is a GitHub glyph and `approved·total`, then only the counts that wait on you (review requests from people, runs to approve, failed runs); the rest is in the dropdown, because macOS silently drops menu bar items that do not fit beside a notch. It is never empty (`--hide-empty` is ignored): SwiftBar removes an item whose output is empty, and the streamable experiment above showed macOS can then keep it hidden.
+
+The dropdown is built from `pickerSections`, the same groups and rows the fuzzel picker flattens, so a new group shows up in both. Sections not marked `bulk` (my PRs, drafts, review requests, workflow runs) are listed under a header; `bulk` ones (grouped review requests, Dependabot, Renovate, pending applies, unreleased repos, notifications) are one row with a count that opens a submenu. A row's age is its `badge`. Rows use `--swiftbar-font`, which must be a Nerd Font, since the glyphs are the picker's; `--swiftbar-width` is the text width in characters.
+
+A row that only opens a page is a plain `href`. The rest call back through the plugin script:
+
+- `--open-run=<id>`: a failed run, so that opening it also dismisses it.
+- `--dispatch-apply=<root>[,<root>…]`: under a root's submenu, next to its compare link, so a root never dispatches on a single click.
+- `--dispatch-release=<owner/repo>@<version>`: one row per bump under the repo's submenu. Typing another version is fuzzel-only.
+
+Each takes names, not row indexes, and resolves them against the scope's cache (`$TMPDIR/waybar-github-prs-<scope>.json` on macOS): the menu can be older than the cache, and an index into a newer list could dispatch a different root. A name the cache no longer holds is refused with a notification. Notifications on macOS go through `osascript`.
+
+`subjectDone` is saved to `subject-done.json` beside the discovery cache and reloaded on the next run, or every poll would spend one call per unread PR notification. A warm poll is about 35 REST calls and 20 s (the `gh` calls run one after another), which is why the plugin is on a 5-minute name rather than waybar's 60 s: both hosts draw on the same 5000 calls an hour.
 
 ### Workflow runs
 
@@ -214,8 +232,6 @@ Two things are read rather than reimplemented. The root list comes from parsing 
 The cut point between applied and unapplied is the **position** of the last successful apply's `head_sha` in the newest-first commit list, not a timestamp comparison — a dispatched apply plans some time after it starts, so the clocks lie. Per-commit results are cached forever, since a commit is immutable.
 
 This is a proxy for a plan, not a plan: it cannot see console drift, and a substantive-looking edit can still plan empty. `drift.yml`'s weekly real plan across all roots remains the authority.
-
-`--swiftbar` skips runs entirely, which also sidesteps a trap: SwiftBar re-execs the binary every 5 minutes as a fresh process, so a run-enabled swiftbar path would need the discovery cache to persist or it would pay the full sweep on every tick.
 
 ### Unreleased changes (`--release-repos`)
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -630,6 +631,13 @@ func notifySend(title, body string) {
 		"--icon", "github",
 		"--category", "im.received",
 		title, body)
+	if runtime.GOOS == "darwin" {
+		cmd = exec.Command("osascript",
+			"-e", "on run argv",
+			"-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+			"-e", "end run",
+			title, body)
+	}
 	if err := cmd.Run(); err != nil {
 		log.Printf("Error sending notification %q: %s", title, err)
 	}

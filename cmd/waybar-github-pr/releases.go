@@ -299,7 +299,7 @@ func chooseRelease(p PendingRelease) {
 	}
 	choice := strings.TrimSpace(string(out))
 	if choice == compare {
-		exec.Command("xdg-open", p.CompareURL).Start()
+		openURL(p.CompareURL)
 		return
 	}
 	version, ok := chosenVersion(choice)
