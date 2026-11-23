@@ -1,12 +1,11 @@
 DESTDIR ?= $(HOME)/.local/bin
 
-SWIFTBAR_BINS := waybar-github-pr waybar-wiim-nowplaying
+SWIFTBAR_BINS := waybar-wiim-nowplaying
 
 .PHONY: build clean install build-swiftbar install-swiftbar
 
 build:
 	go build -o ./build/waybar-gitlab-mr ./cmd/waybar-gitlab-mr
-	go build -o ./build/waybar-github-pr ./cmd/waybar-github-pr
 	go build -o ./build/waybar-wiim-nowplaying ./cmd/waybar-wiim-nowplaying
 	go build -o ./build/waybar-cpu-temp ./cmd/waybar-cpu-temp
 	go build -o ./build/waybar-gpu-temp ./cmd/waybar-gpu-temp
