@@ -3,7 +3,7 @@ Waybar modules written in GO, started to learn some GO. See [AGENTS.md](AGENTS.m
 
 Two kinds of thing live here:
 
-- **Bar modules** — daemons that print one JSON line per tick for Waybar's `custom` module type: `waybar-gitlab-mr`, `waybar-github-pr`, `waybar-wiim-nowplaying`, `waybar-cpu-temp`, `waybar-gpu-temp`, `waybar-tradfri`, `waybar-inhibitors`, `waybar-allsvenskan`, `waybar-batteries`, `waybar-camera`
+- **Bar modules** — daemons that print one JSON line per tick for Waybar's `custom` module type: `waybar-gitlab-mr`, `waybar-wiim-nowplaying`, `waybar-cpu-temp`, `waybar-gpu-temp`, `waybar-tradfri`, `waybar-inhibitors`, `waybar-allsvenskan`, `waybar-batteries`, `waybar-camera`
 - **CLIs** — one-shot tools: `tradfri-ctl`, `waybar-tradfri-auth`
 
 `make` builds everything; binaries land in the `build` folder. `make install` copies them to `~/.local/bin`.
@@ -97,9 +97,7 @@ Add this to your Waybar configuration file, usually `~/.config/waybar/config`:
 ```
 
 ## waybar-github-pr
-Shows how many of your open GitHub PRs are approved and ready to merge, with a bell variant when there are unread notifications. Authentication piggybacks on the `gh` CLI, so `gh auth login` is the only setup. Clicking runs the binary again with `--open`: one ready PR opens directly via `xdg-open`, several present a `fuzzel` picker first. It also fires `notify-send` when a PR becomes ready, and caches state under `$XDG_RUNTIME_DIR` so the click path doesn't re-query. SwiftBar-enabled: on macOS the same groups are a dropdown under the menu bar item.
-
-It also tracks GitHub Actions runs that want your attention: runs stopped at a deployment gate **you** can approve, runs **you** dispatched that are still going, and ones that finished badly — a failed run sticks in the pill until you click it, so a broken deploy can't go quiet the way a successful one does. Each becomes a picker entry linking to the run (approving stays in the browser — a mis-select in a fuzzel list should not deploy to production), and a new gate raises a `notify-send`. With `--apply-repo` it additionally tracks terraform roots that were merged to `main` but never applied — picking one dispatches the apply for you. That comparison ignores files terraform doesn't read and strips comments before diffing, so a PR that only rewrites comments across two dozen roots correctly reports nothing to do. The repos to poll are discovered automatically — every non-archived repo in your orgs that has an environment gated on `required_reviewers` — and cached for an hour under `$XDG_CACHE_HOME`; `--watch-runs` adds repos discovery can't find, and `--discover-only` prints the set. `--runs=false` turns the whole thing off.
+Now its own project, [ghpill](https://github.com/polarn/ghpill), with packages for the AUR and Homebrew.
 
 ## waybar-cpu-temp
 CPU temperature, with a tooltip listing every CPU-related hwmon sensor it found. Sensors are auto-discovered, so there's nothing to configure per machine — `--interval` is the only flag.
